@@ -13,23 +13,27 @@ from typing import Any, Dict, List, Optional, Union
 # MCP imports
 from mcp.server import FastMCP
 
-# TikTok client
+# TikTok Marketing API client
 from .client import TikTokAdsClient
 from .config import config
+
 from .tools import (
     get_business_centers,
     get_authorized_ad_accounts,
     get_campaigns,
     get_ad_groups,
     get_ads,
-    get_reports
+    get_reports,
+    get_gmvmax_campaigns,
+    get_gmvmax_reports,
+    get_gmvmax_campaign_info,
 )
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Global client instance (will be initialized on first use)
+# Global client instance (initialized on first use)
 tiktok_client: Optional[TikTokAdsClient] = None
 
 # Create MCP server instance
@@ -182,6 +186,19 @@ async def get_reports_tool(
     """Get performance reports and analytics with comprehensive filtering and grouping options"""
     
     client = get_tiktok_client()
+
+    # Set smart defaults based on report_type
+    if dimensions is None:
+        if report_type == "TT_SHOP":
+            dimensions = ["advertiser_id", "country_code"]
+        else:
+            dimensions = ["campaign_id", "stat_time_day"]
+    if metrics is None:
+        if report_type == "TT_SHOP":
+            metrics = ["spend", "billed_cost"]
+        else:
+            metrics = ["spend", "impressions"]
+
     reports = await get_reports(
         client,
         advertiser_id=advertiser_id,
@@ -189,8 +206,8 @@ async def get_reports_tool(
         bc_id=bc_id,
         report_type=report_type,
         data_level=data_level,
-        dimensions=dimensions or ["campaign_id", "stat_time_day"],
-        metrics=metrics or ["spend", "impressions"],
+        dimensions=dimensions,
+        metrics=metrics,
         start_date=start_date,
         end_date=end_date,
         filters=filters,
@@ -213,6 +230,102 @@ async def get_reports_tool(
         "count": len(reports.get("list", [])),
         "reports": reports.get("list", [])
     }, indent=2)
+
+@app.tool()
+@handle_errors
+async def get_gmvmax_campaigns_tool(
+    advertiser_id: str,
+    campaign_ids: Optional[List[str]] = None,
+    filtering: Optional[Dict] = None,
+    page: int = 1,
+    page_size: int = 10
+) -> str:
+    """Get GMV Max campaigns via /gmv_max/campaign/get/. Returns campaign list with status and ROI protection info. Default filter: PRODUCT_GMV_MAX."""
+    if not advertiser_id:
+        raise ValueError("advertiser_id is required")
+
+    client = get_tiktok_client()
+    result = await get_gmvmax_campaigns(
+        client, advertiser_id=advertiser_id,
+        campaign_ids=campaign_ids, filtering=filtering,
+        page=page, page_size=page_size
+    )
+
+    return json.dumps({
+        "success": True,
+        "advertiser_id": advertiser_id,
+        "count": len(result["campaigns"]),
+        "campaigns": result["campaigns"],
+        "page_info": result["page_info"],
+    }, indent=2)
+
+
+@app.tool()
+@handle_errors
+async def get_gmvmax_reports_tool(
+    advertiser_id: str,
+    start_date: str,
+    end_date: str,
+    store_ids: List[str],
+    dimensions: Optional[List[str]] = None,
+    metrics: Optional[List[str]] = None,
+    filtering: Optional[Dict] = None,
+    page: int = 1,
+    page_size: int = 1000
+) -> str:
+    """Get GMV Max performance reports via /gmv_max/report/get/.
+    store_ids is REQUIRED (get from campaign info endpoint).
+    Metrics: cost, orders, cost_per_order, gross_revenue, roi, net_cost, creative_delivery_status, product_impressions, product_clicks, product_click_rate, ad_click_rate, ad_conversion_rate, ad_video_view_rate_2s/6s/p25/p50/p75/p100.
+    Dimensions: advertiser_id, stat_time_day, item_id (item_id requires filtering with campaign_ids AND item_group_ids).
+    Filtering: {"campaign_ids": ["..."], "item_group_ids": ["..."]}."""
+
+    client = get_tiktok_client()
+    reports = await get_gmvmax_reports(
+        client,
+        advertiser_id=advertiser_id,
+        start_date=start_date,
+        end_date=end_date,
+        store_ids=store_ids,
+        dimensions=dimensions,
+        metrics=metrics,
+        filtering=filtering,
+        page=page,
+        page_size=page_size
+    )
+
+    return json.dumps({
+        "success": True,
+        "endpoint": "/gmv_max/report/get/",
+        "page_info": reports.get("page_info", {}),
+        "count": len(reports.get("list", [])),
+        "reports": reports.get("list", [])
+    }, indent=2)
+
+
+@app.tool()
+@handle_errors
+async def get_gmvmax_campaign_info_tool(
+    advertiser_id: str,
+    campaign_id: str
+) -> str:
+    """Get detailed info for a specific GMV Max campaign via /campaign/gmv_max/info/. Returns budget, bid, product, and scheduling details."""
+    if not advertiser_id:
+        raise ValueError("advertiser_id is required")
+    if not campaign_id:
+        raise ValueError("campaign_id is required")
+
+    client = get_tiktok_client()
+    result = await get_gmvmax_campaign_info(
+        client, advertiser_id=advertiser_id, campaign_id=campaign_id
+    )
+
+    return json.dumps({
+        "success": True,
+        "advertiser_id": advertiser_id,
+        "campaign_id": campaign_id,
+        "info": result,
+    }, indent=2)
+
 
 def main():
     """Main function to run the MCP server"""

@@ -11,7 +11,7 @@ authors = [
 description = "Model Context Protocol (MCP) plugin for interacting with TikTok Ads API"
 readme = "README.md"
 license = {text = "MIT"}
-requires-python = ">=3.14.0"
+requires-python = ">=3.10"
 keywords = ["tiktok", "ads", "mcp", "api", "marketing", "advertising", "model-context-protocol"]
 classifiers = [
     "Development Status :: 4 - Beta",
