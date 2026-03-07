@@ -27,6 +27,9 @@ from .tools import (
     get_gmvmax_campaigns,
     get_gmvmax_reports,
     get_gmvmax_campaign_info,
+    get_video_info,
+    get_creative_report,
+    get_gmvmax_videos,
 )
 
 # Setup logging
@@ -324,6 +327,107 @@ async def get_gmvmax_campaign_info_tool(
         "advertiser_id": advertiser_id,
         "campaign_id": campaign_id,
         "info": result,
+    }, indent=2)
+
+
+@app.tool()
+@handle_errors
+async def get_video_info_tool(
+    advertiser_id: str,
+    video_ids: List[str]
+) -> str:
+    """Get video asset details (URL, thumbnail, duration) by video IDs. Use with get_ads_tool to map ad → video_id → video URL/poster."""
+    if not advertiser_id:
+        raise ValueError("advertiser_id is required")
+    if not video_ids:
+        raise ValueError("video_ids is required")
+
+    client = get_tiktok_client()
+    videos = await get_video_info(
+        client, advertiser_id=advertiser_id, video_ids=video_ids
+    )
+
+    return json.dumps({
+        "success": True,
+        "advertiser_id": advertiser_id,
+        "count": len(videos),
+        "videos": videos,
+    }, indent=2)
+
+
+@app.tool()
+@handle_errors
+async def get_creative_report_tool(
+    advertiser_id: str,
+    start_date: str,
+    end_date: str,
+    report_type: str = "VIDEO_INSIGHT",
+    page: int = 1,
+    page_size: int = 50,
+    filtering: Optional[Dict] = None
+) -> str:
+    """Get creative-level performance report (video insights, engagement, play metrics). report_type: VIDEO_INSIGHT (default)."""
+    if not advertiser_id:
+        raise ValueError("advertiser_id is required")
+
+    client = get_tiktok_client()
+    result = await get_creative_report(
+        client,
+        advertiser_id=advertiser_id,
+        start_date=start_date,
+        end_date=end_date,
+        report_type=report_type,
+        page=page,
+        page_size=page_size,
+        filtering=filtering,
+    )
+
+    return json.dumps({
+        "success": True,
+        "advertiser_id": advertiser_id,
+        "report_type": report_type,
+        "page_info": result.get("page_info", {}),
+        "count": len(result.get("list", [])),
+        "reports": result.get("list", []),
+    }, indent=2)
+
+
+@app.tool()
+@handle_errors
+async def get_gmvmax_videos_tool(
+    advertiser_id: str,
+    store_id: str,
+    store_authorized_bc_id: Optional[str] = None,
+    need_auth_code_video: bool = True,
+    identity_list: Optional[List[Dict]] = None,
+    page: int = 1,
+    page_size: int = 50
+) -> str:
+    """Get videos available for GMVMAX campaigns for a given store. Returns video list with IDs for cross-referencing with creative reports."""
+    if not advertiser_id:
+        raise ValueError("advertiser_id is required")
+    if not store_id:
+        raise ValueError("store_id is required")
+
+    client = get_tiktok_client()
+    result = await get_gmvmax_videos(
+        client,
+        advertiser_id=advertiser_id,
+        store_id=store_id,
+        store_authorized_bc_id=store_authorized_bc_id,
+        need_auth_code_video=need_auth_code_video,
+        identity_list=identity_list,
+        page=page,
+        page_size=page_size,
+    )
+
+    return json.dumps({
+        "success": True,
+        "advertiser_id": advertiser_id,
+        "store_id": store_id,
+        "page_info": result.get("page_info", {}),
+        "count": len(result.get("list", [])),
+        "videos": result.get("list", []),
     }, indent=2)
 
 
