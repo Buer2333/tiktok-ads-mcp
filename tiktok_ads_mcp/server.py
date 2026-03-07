@@ -30,6 +30,11 @@ from .tools import (
     get_video_info,
     get_creative_report,
     get_gmvmax_videos,
+    get_bc_balance,
+    get_bc_account_cost,
+    get_bc_transactions,
+    get_bc_budget_changelog,
+    get_gmvmax_store_list,
 )
 
 # Setup logging
@@ -429,6 +434,92 @@ async def get_gmvmax_videos_tool(
         "count": len(result.get("list", [])),
         "videos": result.get("list", []),
     }, indent=2)
+
+
+@app.tool()
+@handle_errors
+async def get_bc_balance_tool(bc_id: str) -> str:
+    """Get Business Center balance (available funds)."""
+    if not bc_id:
+        raise ValueError("bc_id is required")
+    client = get_tiktok_client()
+    result = await get_bc_balance(client, bc_id=bc_id)
+    return json.dumps({"success": True, "bc_id": bc_id, "balance": result}, indent=2)
+
+
+@app.tool()
+@handle_errors
+async def get_bc_account_cost_tool(
+    bc_id: str,
+    start_date: str,
+    end_date: str,
+    page: int = 1,
+    page_size: int = 50
+) -> str:
+    """Get cost summary for all ad accounts under a BC within a date range. Useful for weekly/monthly spend review."""
+    if not bc_id:
+        raise ValueError("bc_id is required")
+    client = get_tiktok_client()
+    result = await get_bc_account_cost(
+        client, bc_id=bc_id, start_date=start_date, end_date=end_date,
+        page=page, page_size=page_size
+    )
+    return json.dumps({"success": True, "bc_id": bc_id, "data": result}, indent=2)
+
+
+@app.tool()
+@handle_errors
+async def get_bc_transactions_tool(
+    bc_id: str,
+    start_time: str,
+    end_time: str,
+    transaction_level: str = "BC",
+    page: int = 1,
+    page_size: int = 50
+) -> str:
+    """Get BC transaction records (top-ups, deductions). transaction_level: BC or ADVERTISER. Times format: YYYY-MM-DD HH:MM:SS."""
+    if not bc_id:
+        raise ValueError("bc_id is required")
+    client = get_tiktok_client()
+    result = await get_bc_transactions(
+        client, bc_id=bc_id, start_time=start_time, end_time=end_time,
+        transaction_level=transaction_level, page=page, page_size=page_size
+    )
+    return json.dumps({"success": True, "bc_id": bc_id, "data": result}, indent=2)
+
+
+@app.tool()
+@handle_errors
+async def get_bc_budget_changelog_tool(
+    bc_id: str,
+    advertiser_id: str,
+    start_date: str,
+    end_date: str,
+    page: int = 1,
+    page_size: int = 50
+) -> str:
+    """Get budget change history for a specific advertiser under BC. Track who changed budget and when."""
+    if not bc_id:
+        raise ValueError("bc_id is required")
+    if not advertiser_id:
+        raise ValueError("advertiser_id is required")
+    client = get_tiktok_client()
+    result = await get_bc_budget_changelog(
+        client, bc_id=bc_id, advertiser_id=advertiser_id,
+        start_date=start_date, end_date=end_date, page=page, page_size=page_size
+    )
+    return json.dumps({"success": True, "bc_id": bc_id, "advertiser_id": advertiser_id, "data": result}, indent=2)
+
+
+@app.tool()
+@handle_errors
+async def get_gmvmax_store_list_tool(advertiser_id: str) -> str:
+    """Get stores linked to a GMVMAX advertiser account. Useful to verify store-advertiser bindings."""
+    if not advertiser_id:
+        raise ValueError("advertiser_id is required")
+    client = get_tiktok_client()
+    result = await get_gmvmax_store_list(client, advertiser_id=advertiser_id)
+    return json.dumps({"success": True, "advertiser_id": advertiser_id, "data": result}, indent=2)
 
 
 def main():
