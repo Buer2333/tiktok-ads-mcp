@@ -35,6 +35,7 @@ from .tools import (
     get_bc_transactions,
     get_bc_budget_changelog,
     get_gmvmax_store_list,
+    get_advertiser_balance,
 )
 
 # Setup logging
@@ -520,6 +521,21 @@ async def get_gmvmax_store_list_tool(advertiser_id: str) -> str:
     client = get_tiktok_client()
     result = await get_gmvmax_store_list(client, advertiser_id=advertiser_id)
     return json.dumps({"success": True, "advertiser_id": advertiser_id, "data": result}, indent=2)
+
+
+@app.tool()
+@handle_errors
+async def get_advertiser_balance_tool(advertiser_ids: List[str]) -> str:
+    """Get balance and basic info for individual advertiser accounts. Max 100 IDs per request."""
+    if not advertiser_ids:
+        raise ValueError("advertiser_ids is required")
+    client = get_tiktok_client()
+    result = await get_advertiser_balance(client, advertiser_ids=advertiser_ids)
+    return json.dumps({
+        "success": True,
+        "count": len(result),
+        "advertisers": result,
+    }, indent=2)
 
 
 def main():

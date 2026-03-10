@@ -32,14 +32,14 @@ async def get_business_centers(client, bc_id: Optional[str] = None, page: int = 
             
             return [
                 {
-                    "bc_id": bc.get("bc_id"),
-                    "name": bc.get("name", "Unknown"),
-                    "company": bc.get("company", ""),
-                    "currency": bc.get("currency", ""),
-                    "registered_area": bc.get("registered_area", ""),
-                    "status": bc.get("status", "Unknown"),
-                    "timezone": bc.get("timezone", ""),
-                    "type": bc.get("type", "Unknown"),
+                    "bc_id": bc.get("bc_info", {}).get("bc_id") or bc.get("bc_id"),
+                    "name": bc.get("bc_info", {}).get("name") or bc.get("name", "Unknown"),
+                    "company": bc.get("bc_info", {}).get("company") or bc.get("company", ""),
+                    "currency": bc.get("bc_info", {}).get("currency") or bc.get("currency", ""),
+                    "registered_area": bc.get("bc_info", {}).get("registered_area") or bc.get("registered_area", ""),
+                    "status": bc.get("bc_info", {}).get("status") or bc.get("status", "Unknown"),
+                    "timezone": bc.get("bc_info", {}).get("timezone") or bc.get("timezone", ""),
+                    "type": bc.get("bc_info", {}).get("type") or bc.get("type", "Unknown"),
                     "user_role": bc.get("user_role", "Unknown"),
                     "finance_role": bc.get("finance_role"),
                     "ext_user_role": bc.get("ext_user_role")
