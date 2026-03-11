@@ -73,11 +73,14 @@ async def test_get_advertiser_balance_too_many_ids(mock_client):
 
 @pytest.mark.asyncio
 async def test_get_advertiser_balance_api_error(mock_client):
-    """Test that API errors propagate correctly."""
+    """Test that API errors fall back to individual queries and return error status."""
     mock_client._make_request.side_effect = Exception("TikTok API error 40001: Unauthorized")
 
-    with pytest.raises(Exception, match="Unauthorized"):
-        await get_advertiser_balance(mock_client, advertiser_ids=["111"])
+    result = await get_advertiser_balance(mock_client, advertiser_ids=["111"])
+    assert len(result) == 1
+    assert result[0]["advertiser_id"] == "111"
+    assert result[0]["status"] == "ERROR"
+    assert "Unauthorized" in result[0]["error"]
 
 
 @pytest.mark.asyncio
