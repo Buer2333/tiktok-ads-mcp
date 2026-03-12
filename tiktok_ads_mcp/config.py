@@ -10,6 +10,7 @@ class TikTokConfig:
     APP_ID: str = os.getenv("TIKTOK_APP_ID", "")
     SECRET: str = os.getenv("TIKTOK_SECRET", "")
     ACCESS_TOKEN: str = os.getenv("TIKTOK_ACCESS_TOKEN", "")
+    ACCESS_TOKEN_2: str = os.getenv("TIKTOK_ACCESS_TOKEN_2", "")
     ADVERTISER_ID: str = os.getenv("TIKTOK_ADVERTISER_ID", "")
     SANDBOX: bool = os.getenv("TIKTOK_SANDBOX", "false").lower() == "true"
     

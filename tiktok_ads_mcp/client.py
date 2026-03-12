@@ -1,4 +1,4 @@
-"""TikTok Ads API Client for MCP Server"""
+"""TikTok Ads API Client for MCP Server — dual BC token fallback."""
 
 import httpx
 import json
@@ -12,50 +12,55 @@ from .config import config
 # Set up logging
 logger = logging.getLogger(__name__)
 
+
+class TikTokPermissionError(Exception):
+    """Raised when advertiser is not authorized under current token."""
+    pass
+
+
 class TikTokAdsClient:
-    """TikTok Business API client for campaign operations."""
-    
+    """TikTok Business API client with dual-token fallback."""
+
     def __init__(self):
-        """Initialize TikTok API client"""
-        # Validate credentials on initialization
+        """Initialize TikTok API client with one or two tokens."""
         if not config.validate_credentials():
             missing = config.get_missing_credentials()
             raise Exception(
                 f"Missing required credentials: {', '.join(missing)}. "
                 f"Please check your configuration and ensure all required fields are set."
             )
-        
+
         self.app_id = config.APP_ID
         self.secret = config.SECRET
-        self.access_token = config.ACCESS_TOKEN
         self.base_url = config.BASE_URL
         self.api_version = config.API_VERSION
         self.request_timeout = config.REQUEST_TIMEOUT
-        
-        logger.info("TikTok API client initialized")
-    
-    @httpx_retry()
-    async def _make_request(self, method: str, endpoint: str, params: Optional[Dict] = None,
-                     data: Optional[Dict] = None) -> Dict[str, Any]:
-        """Make HTTP request to TikTok API with retry on transient errors."""
 
-        if params is None:
-            params = {}
+        # Build token list (token 2 is optional)
+        self.tokens: List[str] = [config.ACCESS_TOKEN]
+        if config.ACCESS_TOKEN_2:
+            self.tokens.append(config.ACCESS_TOKEN_2)
 
-        if 'oauth2' in endpoint:
-            params.update({
-                'app_id': self.app_id,
-                'secret': self.secret
-            })
+        # Cache: advertiser_id -> token index (which token works)
+        self._token_map: Dict[str, int] = {}
 
+        n = len(self.tokens)
+        logger.info(f"TikTok API client initialized with {n} token(s)")
+
+    def _build_url(self, endpoint: str, params: Optional[Dict]) -> str:
         if params:
             query_string = urlencode(params)
-            url = f"{self.base_url}/{self.api_version}/{endpoint}?{query_string}"
-        else:
-            url = f"{self.base_url}/{self.api_version}/{endpoint}"
+            return f"{self.base_url}/{self.api_version}/{endpoint}?{query_string}"
+        return f"{self.base_url}/{self.api_version}/{endpoint}"
 
+    @httpx_retry()
+    async def _do_request(self, token: str, method: str, endpoint: str,
+                          params: Optional[Dict] = None,
+                          data: Optional[Dict] = None) -> Dict[str, Any]:
+        """Execute a single HTTP request with retry on transient errors."""
+        url = self._build_url(endpoint, params)
         headers = {
-            'Access-Token': self.access_token,
+            'Access-Token': token,
             'Content-Type': 'application/json'
         }
 
@@ -75,15 +80,14 @@ class TikTokAdsClient:
             if response.status_code == 403:
                 raise Exception("Access forbidden - check your API permissions")
 
-            # Retryable: 429 and 5xx → raise HTTPStatusError for retry decorator
+            # Retryable: 429 and 5xx
             if response.status_code == 429 or response.status_code >= 500:
                 response.raise_for_status()
 
-            # Other client errors (400, 404, etc.)
+            # Other client errors
             if response.status_code >= 400:
                 raise Exception(f"HTTP {response.status_code}: {response.text}")
 
-            # Parse response
             try:
                 result = response.json()
             except json.JSONDecodeError:
@@ -92,6 +96,59 @@ class TikTokAdsClient:
             # Check TikTok API response code
             if result.get('code') != 0:
                 error_msg = result.get('message', 'Unknown API error')
-                raise Exception(f"TikTok API error {result.get('code')}: {error_msg}")
+                error_code = result.get('code', 0)
+                # Detect permission errors for token fallback
+                msg_lower = error_msg.lower()
+                if ("no permission" in msg_lower or "not authorized" in msg_lower
+                        or "punish" in msg_lower):
+                    raise TikTokPermissionError(
+                        f"TikTok API error {error_code}: {error_msg}")
+                raise Exception(f"TikTok API error {error_code}: {error_msg}")
 
             return result
+
+    async def _make_request(self, method: str, endpoint: str,
+                            params: Optional[Dict] = None,
+                            data: Optional[Dict] = None) -> Dict[str, Any]:
+        """Make request with automatic token fallback on permission errors."""
+        if params is None:
+            params = {}
+
+        # oauth2 endpoints: inject app credentials, always use token[0]
+        if 'oauth2' in endpoint:
+            params.update({
+                'app_id': self.app_id,
+                'secret': self.secret
+            })
+            return await self._do_request(self.tokens[0], method, endpoint,
+                                          params, data)
+
+        # Extract advertiser_id for token selection
+        adv_id = params.get('advertiser_id') or (data or {}).get('advertiser_id')
+
+        # Determine token order
+        if adv_id and adv_id in self._token_map:
+            # Known advertiser → try cached token first, then others
+            cached_idx = self._token_map[adv_id]
+            indices = [cached_idx] + [i for i in range(len(self.tokens))
+                                      if i != cached_idx]
+        else:
+            indices = list(range(len(self.tokens)))
+
+        last_error = None
+        for idx in indices:
+            try:
+                result = await self._do_request(
+                    self.tokens[idx], method, endpoint, params, data)
+                # Success — cache token mapping
+                if adv_id:
+                    self._token_map[adv_id] = idx
+                return result
+            except TikTokPermissionError as e:
+                logger.info(f"Token {idx} permission denied for {adv_id or 'unknown'}, "
+                            f"trying next token...")
+                last_error = e
+                continue
+
+        # All tokens exhausted
+        raise last_error
