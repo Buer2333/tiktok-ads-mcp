@@ -3,23 +3,50 @@
 import os
 from typing import Dict, Any, List, Optional
 
+
 class TikTokConfig:
-    """Configuration class for TikTok Business API"""
-    
-    # TikTok API Configuration
-    APP_ID: str = os.getenv("TIKTOK_APP_ID", "")
-    SECRET: str = os.getenv("TIKTOK_SECRET", "")
-    ACCESS_TOKEN: str = os.getenv("TIKTOK_ACCESS_TOKEN_XINCHENG", "")
-    ACCESS_TOKEN_2: str = os.getenv("TIKTOK_ACCESS_TOKEN_ZECHENG", "")
-    ADVERTISER_ID: str = os.getenv("TIKTOK_ADVERTISER_ID", "")
-    SANDBOX: bool = os.getenv("TIKTOK_SANDBOX", "false").lower() == "true"
-    
-    # API URLs
-    BASE_URL: str = "https://business-api.tiktok.com/open_api" if not SANDBOX else "https://sandbox-ads.tiktok.com/open_api"
+    """Configuration class for TikTok Business API.
+
+    All env vars are read at access time (properties), not at import time,
+    so that callers like lark-bot can load .env files before first use.
+    """
+
+    # API URLs (static)
     API_VERSION: str = "v1.3"
-    
-    # Request Configuration
-    REQUEST_TIMEOUT: int = int(os.getenv("TIKTOK_REQUEST_TIMEOUT", "30"))  # seconds
+
+    @property
+    def APP_ID(self) -> str:
+        return os.getenv("TIKTOK_APP_ID", "")
+
+    @property
+    def SECRET(self) -> str:
+        return os.getenv("TIKTOK_SECRET", "")
+
+    @property
+    def ACCESS_TOKEN(self) -> str:
+        return os.getenv("TIKTOK_ACCESS_TOKEN_XINCHENG", "")
+
+    @property
+    def ACCESS_TOKEN_2(self) -> str:
+        return os.getenv("TIKTOK_ACCESS_TOKEN_ZECHENG", "")
+
+    @property
+    def ADVERTISER_ID(self) -> str:
+        return os.getenv("TIKTOK_ADVERTISER_ID", "")
+
+    @property
+    def SANDBOX(self) -> bool:
+        return os.getenv("TIKTOK_SANDBOX", "false").lower() == "true"
+
+    @property
+    def BASE_URL(self) -> str:
+        if self.SANDBOX:
+            return "https://sandbox-ads.tiktok.com/open_api"
+        return "https://business-api.tiktok.com/open_api"
+
+    @property
+    def REQUEST_TIMEOUT(self) -> int:
+        return int(os.getenv("TIKTOK_REQUEST_TIMEOUT", "30"))
 
     # Shop-Ads Account Mapping
     # Each shop maps to its GMVMAX and manual-bid (Ads) advertiser accounts
@@ -121,38 +148,37 @@ class TikTokConfig:
     def get_advertiser_shop(cls, advertiser_id: str) -> Optional[Dict[str, Any]]:
         """Find which shop an advertiser_id belongs to"""
         for key, val in cls.SHOP_ADS_MAP.items():
-            if val["gmvmax_advertiser_id"] == advertiser_id or val.get("ads_advertiser_id") == advertiser_id:
+            if (
+                val["gmvmax_advertiser_id"] == advertiser_id
+                or val.get("ads_advertiser_id") == advertiser_id
+            ):
                 return {"name": key, **val}
         return None
 
-    @classmethod
-    def validate_credentials(cls) -> bool:
+    def validate_credentials(self) -> bool:
         """Validate that all required credentials are present"""
-        required_fields = [cls.APP_ID, cls.SECRET, cls.ACCESS_TOKEN]
+        required_fields = [self.APP_ID, self.SECRET, self.ACCESS_TOKEN]
         return all(field.strip() for field in required_fields)
-    
-    @classmethod
-    def get_missing_credentials(cls) -> List[str]:
+
+    def get_missing_credentials(self) -> List[str]:
         """Get list of missing credential fields"""
         missing = []
-        if not cls.APP_ID.strip():
+        if not self.APP_ID.strip():
             missing.append("TIKTOK_APP_ID")
-        if not cls.SECRET.strip():
+        if not self.SECRET.strip():
             missing.append("TIKTOK_SECRET")
-        if not cls.ACCESS_TOKEN.strip():
+        if not self.ACCESS_TOKEN.strip():
             missing.append("TIKTOK_ACCESS_TOKEN")
         return missing
-    
 
-    
-    @classmethod
-    def get_health_info(cls) -> Dict[str, Any]:
+    def get_health_info(self) -> Dict[str, Any]:
         """Get system health information"""
         return {
-            "config_valid": cls.validate_credentials(),
-            "base_url": cls.BASE_URL,
-            "api_version": cls.API_VERSION
+            "config_valid": self.validate_credentials(),
+            "base_url": self.BASE_URL,
+            "api_version": self.API_VERSION,
         }
 
+
 # Global config instance
-config = TikTokConfig() 
+config = TikTokConfig()
