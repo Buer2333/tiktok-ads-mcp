@@ -21,15 +21,27 @@ class AdAccountManager:
 
     def __init__(
         self,
-        client: TikTokAdsClient,
-        ad_cost_cache: AdCostCache,
-        ban_status_cache: BanStatusCache,
-        balance_cache: BalanceSnapshotCache,
+        client: Optional[TikTokAdsClient] = None,
+        ad_cost_cache: Optional[AdCostCache] = None,
+        ban_status_cache: Optional[BanStatusCache] = None,
+        balance_cache: Optional[BalanceSnapshotCache] = None,
+        client_factory=None,
     ):
-        self.client = client
+        self._client = client
+        self._client_factory = client_factory
         self.ad_cost_cache = ad_cost_cache
         self.ban_status_cache = ban_status_cache
         self.balance_cache = balance_cache
+
+    @property
+    def client(self) -> TikTokAdsClient:
+        """Lazy client — only created when API calls are needed."""
+        if self._client is None:
+            if self._client_factory:
+                self._client = self._client_factory()
+            else:
+                self._client = TikTokAdsClient()
+        return self._client
 
     # ── Probe account status ─────────────────────────────────────────
 
