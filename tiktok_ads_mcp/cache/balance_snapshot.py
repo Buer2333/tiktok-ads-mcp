@@ -34,16 +34,20 @@ class BalanceSnapshotCache:
     def _load(self) -> Dict:
         if self._data is not None:
             return self._data
+        # Load seed as baseline (committed from CI), then overlay local cache
+        seed_data = {}
+        if self._seed_file:
+            try:
+                seed_data = json.loads(self._seed_file.read_text())
+            except (FileNotFoundError, json.JSONDecodeError):
+                pass
+        cache_data = {}
         try:
-            self._data = json.loads(self._cache_file.read_text())
+            cache_data = json.loads(self._cache_file.read_text())
         except (FileNotFoundError, json.JSONDecodeError):
-            if self._seed_file:
-                try:
-                    self._data = json.loads(self._seed_file.read_text())
-                except (FileNotFoundError, json.JSONDecodeError):
-                    self._data = {}
-            else:
-                self._data = {}
+            pass
+        # Merge: seed provides baseline, cache overrides
+        self._data = {**seed_data, **cache_data}
         return self._data
 
     def _save(self):
