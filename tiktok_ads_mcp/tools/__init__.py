@@ -19,6 +19,8 @@ from .bc_budget_changelog import get_bc_budget_changelog
 from .gmvmax_store_list import get_gmvmax_store_list
 from .advertiser_balance import get_advertiser_balance
 from .gmvmax_report_aligned import get_gmvmax_report_aligned
+from .ads_report_aligned import get_ads_report_aligned
+from .range_reports import get_gmvmax_range_report, get_ads_range_report
 
 __all__ = [
     "get_business_centers",
@@ -40,4 +42,7 @@ __all__ = [
     "get_gmvmax_store_list",
     "get_advertiser_balance",
     "get_gmvmax_report_aligned",
+    "get_ads_report_aligned",
+    "get_gmvmax_range_report",
+    "get_ads_range_report",
 ]

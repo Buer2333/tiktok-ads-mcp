@@ -644,6 +644,83 @@ async def get_gmvmax_report_aligned_tool(
     return json.dumps({"success": True, **result}, indent=2)
 
 
+@app.tool()
+@handle_errors
+async def get_ads_report_aligned_tool(
+    advertiser_id: str,
+    date: str,
+    shop_tz: str = "America/Los_Angeles",
+    metrics: Optional[List[str]] = None,
+) -> str:
+    """Get Ads (manual bid) report aligned to shop timezone. Fetches hourly data and re-aggregates to match a shop-tz day. Returns cost, gmv, orders, and roas."""
+    if not advertiser_id:
+        raise ValueError("advertiser_id is required")
+    if not date:
+        raise ValueError("date is required")
+
+    from .tools import get_ads_report_aligned
+
+    client = get_tiktok_client()
+    result = await get_ads_report_aligned(
+        client,
+        advertiser_id=advertiser_id,
+        date=date,
+        shop_tz=shop_tz,
+        metrics=metrics,
+    )
+    return json.dumps({"success": True, **result}, indent=2)
+
+
+@app.tool()
+@handle_errors
+async def get_gmvmax_range_report_tool(
+    advertiser_id: str,
+    store_ids: List[str],
+    start_date: str,
+    end_date: str,
+) -> str:
+    """Get GMVMAX aggregate report for a date range (no timezone alignment). Returns cost, gmv, orders, roi."""
+    if not advertiser_id:
+        raise ValueError("advertiser_id is required")
+    if not store_ids:
+        raise ValueError("store_ids is required")
+
+    from .tools import get_gmvmax_range_report
+
+    client = get_tiktok_client()
+    result = await get_gmvmax_range_report(
+        client,
+        advertiser_id=advertiser_id,
+        store_ids=store_ids,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    return json.dumps({"success": True, **result}, indent=2)
+
+
+@app.tool()
+@handle_errors
+async def get_ads_range_report_tool(
+    advertiser_id: str,
+    start_date: str,
+    end_date: str,
+) -> str:
+    """Get Ads (manual bid) aggregate report for a date range (no timezone alignment). Returns cost, gmv, orders, roas."""
+    if not advertiser_id:
+        raise ValueError("advertiser_id is required")
+
+    from .tools import get_ads_range_report
+
+    client = get_tiktok_client()
+    result = await get_ads_range_report(
+        client,
+        advertiser_id=advertiser_id,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    return json.dumps({"success": True, **result}, indent=2)
+
+
 def main():
     """Main function to run the MCP server"""
     logger.info("Starting TikTok Ads MCP Server...")
