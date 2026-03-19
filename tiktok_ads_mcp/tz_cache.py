@@ -54,7 +54,7 @@ async def warmup_tz_cache(client: TikTokAdsClient, advertiser_ids: List[str]) ->
         try:
             params = {
                 "advertiser_ids": json.dumps(batch),
-                "fields": json.dumps(["timezone"]),
+                "fields": json.dumps(["advertiser_id", "timezone"]),
             }
             response = await client._make_request("GET", "advertiser/info/", params)
             if response.get("code") == 0:
