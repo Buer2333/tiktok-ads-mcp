@@ -204,12 +204,41 @@ class AdAccountManager:
         shop_tz: str = "America/Los_Angeles",
         store_ids: Optional[List[str]] = None,
         period: str = "today",
+        banned: bool = False,
     ) -> Dict:
-        """Fetch single-day ad cost with ban-check, API call, cache write, and fallback.
+        """Fetch single-day ad cost with ban-awareness, API call, cache, and fallback.
+
+        Ban-aware logic (all TikTok business logic lives here, not in callers):
+        - banned + today: try API (captures pre-ban spend), fallback to $0
+        - banned + non-today: try cache first (avoid API call), skip if no cache
+        - not banned: try API, fallback to cache on permission error
 
         Returns dict with keys: cost, gmv, orders, and roi/roas.
-        On TikTokPermissionError, falls back to cached data.
         """
+        roi_key = "roi" if ad_type.lower() == "gmvmax" else "roas"
+        zero = {"cost": 0.0, "gmv": 0.0, "orders": 0, roi_key: 0.0}
+
+        # Banned + non-today: cache-first (avoid unnecessary API calls)
+        if banned and period != "today":
+            status = (
+                self.ban_status_cache.get_status(advertiser_id)
+                if self.ban_status_cache
+                else None
+            )
+            last_active = status.get("last_active_date", "") if status else ""
+            if last_active and last_active >= date_str:
+                cached = self.ad_cost_cache.get_daily(
+                    advertiser_id, date_str, ad_type.lower()
+                )
+                if cached and cached["cost"] > 0:
+                    logger.info(
+                        f"{ad_type} ...{advertiser_id[-6:]}: "
+                        f"${cached['cost']:,.2f} from cache (banned)"
+                    )
+                    return cached
+            return zero
+
+        # Not banned, or banned + today: try API
         try:
             m = await self._fetch_single_report(
                 advertiser_id,
@@ -227,6 +256,11 @@ class AdAccountManager:
                 m["gmv"],
                 m["orders"],
             )
+            if banned and m["cost"] > 0:
+                logger.info(
+                    f"{ad_type} ...{advertiser_id[-6:]}: "
+                    f"${m['cost']:,.2f} (banned, pre-ban spend)"
+                )
             return m
         except TikTokPermissionError:
             cached = self.ad_cost_cache.get_daily(
@@ -239,8 +273,7 @@ class AdAccountManager:
                 )
                 return cached
             logger.info(f"{ad_type} ...{advertiser_id[-6:]}: no permission, no cache")
-            roi_key = "roi" if ad_type.lower() == "gmvmax" else "roas"
-            return {"cost": 0.0, "gmv": 0.0, "orders": 0, roi_key: 0.0}
+            return zero
 
     async def fetch_ad_cost_range(
         self,
@@ -249,11 +282,34 @@ class AdAccountManager:
         end: str,
         ad_type: str,
         store_ids: Optional[List[str]] = None,
+        banned: bool = False,
     ) -> Dict:
-        """Fetch date-range ad cost with cache fallback on permission error.
+        """Fetch date-range ad cost with ban-awareness and cache fallback.
 
+        Ban-aware: banned accounts use cache directly (avoid API calls for ranges).
         Returns dict with keys: cost, gmv, orders.
         """
+        roi_key = "roi" if ad_type.lower() == "gmvmax" else "roas"
+        zero = {"cost": 0.0, "gmv": 0.0, "orders": 0, roi_key: 0.0}
+
+        # Banned accounts: cache-only for ranges (too many API calls otherwise)
+        if banned:
+            cached = self.ad_cost_cache.get_range(
+                advertiser_id, start, end, ad_type.lower(), allow_partial=True
+            )
+            if cached:
+                days_info = ""
+                if "cached_days" in cached:
+                    days_info = (
+                        f" ({cached['cached_days']}/{cached['total_days']} days)"
+                    )
+                logger.info(
+                    f"{ad_type} ...{advertiser_id[-6:]}: "
+                    f"${cached['cost']:.2f} from cache (banned){days_info}"
+                )
+                return cached
+            return zero
+
         try:
             m = await self._fetch_range_report(
                 advertiser_id,
@@ -273,8 +329,7 @@ class AdAccountManager:
                     f"${cached['cost']:.2f} from cache (no permission)"
                 )
                 return cached
-            roi_key = "roi" if ad_type.lower() == "gmvmax" else "roas"
-            return {"cost": 0.0, "gmv": 0.0, "orders": 0, roi_key: 0.0}
+            return zero
 
     # ── Balance ──────────────────────────────────────────────────────
 

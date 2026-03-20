@@ -632,6 +632,8 @@ async def get_gmvmax_report_aligned_tool(
     if not store_ids:
         raise ValueError("store_ids is required")
 
+    from .tools import get_gmvmax_report_aligned
+
     client = get_tiktok_client()
     result = await get_gmvmax_report_aligned(
         client,
