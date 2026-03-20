@@ -220,22 +220,15 @@ class AdAccountManager:
 
         # Banned + non-today: cache-first (avoid unnecessary API calls)
         if banned and period != "today":
-            status = (
-                self.ban_status_cache.get_status(advertiser_id)
-                if self.ban_status_cache
-                else None
+            cached = self.ad_cost_cache.get_daily(
+                advertiser_id, date_str, ad_type.lower()
             )
-            last_active = status.get("last_active_date", "") if status else ""
-            if last_active and last_active >= date_str:
-                cached = self.ad_cost_cache.get_daily(
-                    advertiser_id, date_str, ad_type.lower()
+            if cached and cached["cost"] > 0:
+                logger.info(
+                    f"{ad_type} ...{advertiser_id[-6:]}: "
+                    f"${cached['cost']:,.2f} from cache (banned)"
                 )
-                if cached and cached["cost"] > 0:
-                    logger.info(
-                        f"{ad_type} ...{advertiser_id[-6:]}: "
-                        f"${cached['cost']:,.2f} from cache (banned)"
-                    )
-                    return cached
+                return cached
             return zero
 
         # Not banned, or banned + today: try API
