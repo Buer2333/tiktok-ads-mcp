@@ -139,9 +139,41 @@ def test_backfill_zero_days(manager, caches):
 
 
 def test_backfill_zero_days_empty_last_active(manager, caches):
-    """Empty last_active_date should be a no-op."""
+    """Empty last_active_date without detected_at should be a no-op."""
     manager.backfill_zero_days("111", "gmvmax", "")
     # Nothing should be cached
+
+
+def test_backfill_zero_days_detected_at_fallback(manager, caches):
+    """Empty last_active_date with detected_at should backfill from detected_at - 1."""
+    from datetime import date
+
+    with patch("tiktok_ads_mcp.business.account_manager.datetime") as mock_dt:
+        mock_dt.strptime.side_effect = __import__("datetime").datetime.strptime
+        mock_dt.now.return_value.date.return_value = date(2026, 3, 21)
+
+        manager.backfill_zero_days("111", "gmvmax", "", detected_at="2026-03-17")
+
+        # Should fill 03-17, 03-18, 03-19, 03-20 (detected_at-1 = 03-16, fill from 03-17)
+        assert caches["ad_cost"].get_daily("111", "2026-03-17", "gmvmax")["cost"] == 0.0
+        assert caches["ad_cost"].get_daily("111", "2026-03-20", "gmvmax")["cost"] == 0.0
+
+
+def test_backfill_force_overwrite(manager, caches):
+    """force_overwrite should replace stale non-zero cache entries."""
+    from datetime import date
+
+    # Pre-populate with stale data
+    caches["ad_cost"].put_daily("111", "2026-03-19", "gmvmax", 4322.0, 6000.0, 100)
+
+    with patch("tiktok_ads_mcp.business.account_manager.datetime") as mock_dt:
+        mock_dt.strptime.side_effect = __import__("datetime").datetime.strptime
+        mock_dt.now.return_value.date.return_value = date(2026, 3, 21)
+
+        manager.backfill_zero_days("111", "gmvmax", "2026-03-16", force_overwrite=True)
+
+        # Stale entry should be overwritten with $0
+        assert caches["ad_cost"].get_daily("111", "2026-03-19", "gmvmax")["cost"] == 0.0
 
 
 # ── fetch_ad_cost ──
@@ -192,6 +224,57 @@ async def test_fetch_ad_cost_permission_error_no_cache(manager):
         )
         assert result["cost"] == 0.0
         assert result["orders"] == 0
+
+
+@pytest.mark.asyncio
+async def test_fetch_ad_cost_banned_rejects_stale_cache(manager, caches):
+    """NO_ACCESS_CONFIRMED_BANNED should reject cache for dates >= detected_at."""
+    # Stale cache from before ban was detected
+    caches["ad_cost"].put_daily("111", "2026-03-19", "gmvmax", 4322.0, 6000.0, 100)
+    # Ban info
+    caches["ban_status"].set_banned(
+        "111",
+        status="NO_ACCESS_CONFIRMED_BANNED",
+        detected_at="2026-03-17",
+    )
+
+    result = await manager.fetch_ad_cost(
+        "111", "2026-03-19", "gmvmax", period="yesterday", banned=True
+    )
+    assert result["cost"] == 0.0  # Stale cache rejected
+
+
+@pytest.mark.asyncio
+async def test_fetch_ad_cost_banned_keeps_pre_ban_cache(manager, caches):
+    """NO_ACCESS_CONFIRMED_BANNED should keep cache for dates < detected_at."""
+    # Real data from before the ban
+    caches["ad_cost"].put_daily("111", "2026-03-15", "gmvmax", 500.0, 1500.0, 20)
+    caches["ban_status"].set_banned(
+        "111",
+        status="NO_ACCESS_CONFIRMED_BANNED",
+        detected_at="2026-03-17",
+    )
+
+    result = await manager.fetch_ad_cost(
+        "111", "2026-03-15", "gmvmax", period="yesterday", banned=True
+    )
+    assert result["cost"] == 500.0  # Pre-ban data kept
+
+
+@pytest.mark.asyncio
+async def test_fetch_ad_cost_status_limit_keeps_cache(manager, caches):
+    """STATUS_LIMIT should still return cached data (API may still work)."""
+    caches["ad_cost"].put_daily("111", "2026-03-19", "gmvmax", 200.0, 600.0, 10)
+    caches["ban_status"].set_banned(
+        "111",
+        status="STATUS_LIMIT",
+        detected_at="2026-03-17",
+    )
+
+    result = await manager.fetch_ad_cost(
+        "111", "2026-03-19", "gmvmax", period="yesterday", banned=True
+    )
+    assert result["cost"] == 200.0  # STATUS_LIMIT keeps cache
 
 
 @pytest.mark.asyncio

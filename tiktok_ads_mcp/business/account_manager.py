@@ -113,18 +113,33 @@ class AdAccountManager:
         ad_type: str,
         last_active_date: str,
         shop_tz: str = "",
+        detected_at: str = "",
+        force_overwrite: bool = False,
     ):
         """Fill $0 cost in ad_cost_cache for all days after last_active_date through yesterday.
 
         Ensures get_range() has complete coverage for banned accounts.
         Today is excluded — it will be filled on the next run if still banned.
+
+        If last_active_date is empty but detected_at is provided, uses
+        detected_at - 1 day as the start point (ensures post-ban days are zeroed).
+
+        If force_overwrite is True, overwrites existing non-zero cache entries
+        (used to clear stale data for NO_ACCESS_CONFIRMED_BANNED accounts).
         """
-        if not last_active_date:
+        start_date = last_active_date
+        if not start_date and detected_at:
+            # Use day before ban detection as fallback start
+            start_date = (
+                datetime.strptime(detected_at, "%Y-%m-%d") - timedelta(days=1)
+            ).strftime("%Y-%m-%d")
+
+        if not start_date:
             return
 
         from zoneinfo import ZoneInfo
 
-        last_active = datetime.strptime(last_active_date, "%Y-%m-%d").date()
+        last_active = datetime.strptime(start_date, "%Y-%m-%d").date()
         if shop_tz:
             tz = ZoneInfo(shop_tz)
             today = datetime.now(timezone.utc).astimezone(tz).date()
@@ -139,7 +154,7 @@ class AdAccountManager:
             existing = self.ad_cost_cache.get_daily(
                 advertiser_id, date_str, ad_type_lower
             )
-            if existing is None:
+            if existing is None or (force_overwrite and existing.get("cost", 0) > 0):
                 self.ad_cost_cache.put_daily(
                     advertiser_id, date_str, ad_type_lower, 0.0, 0.0, 0
                 )
@@ -147,7 +162,7 @@ class AdAccountManager:
             current += timedelta(days=1)
 
         if filled > 0:
-            print(f"    Backfilled {filled} zero-cost days after {last_active_date}")
+            print(f"    Backfilled {filled} zero-cost days after {start_date}")
 
     # ── Rescue cache (async — tries to save data before API access revoked) ──
 
@@ -220,10 +235,34 @@ class AdAccountManager:
 
         # Banned + non-today: cache-first (avoid unnecessary API calls)
         if banned and period != "today":
+            # Validate: don't return stale cache from before ban detection
+            # If date_str is after detected_at and status is NO_ACCESS,
+            # the cache might be stale (written before ban was detected)
+            ban_info = (
+                self.ban_status_cache.get_status(advertiser_id)
+                if self.ban_status_cache
+                else None
+            )
+            detected_at = ban_info.get("detected_at", "") if ban_info else ""
+            ban_status = ban_info.get("status", "") if ban_info else ""
+
             cached = self.ad_cost_cache.get_daily(
                 advertiser_id, date_str, ad_type.lower()
             )
             if cached and cached["cost"] > 0:
+                # For NO_ACCESS accounts, reject cache for dates after ban
+                # (stale data written before ban was detected)
+                if (
+                    ban_status == "NO_ACCESS_CONFIRMED_BANNED"
+                    and detected_at
+                    and date_str >= detected_at
+                ):
+                    logger.info(
+                        f"{ad_type} ...{advertiser_id[-6:]}: "
+                        f"${cached['cost']:,.2f} in cache REJECTED "
+                        f"(NO_ACCESS, date {date_str} >= detected {detected_at})"
+                    )
+                    return zero
                 logger.info(
                     f"{ad_type} ...{advertiser_id[-6:]}: "
                     f"${cached['cost']:,.2f} from cache (banned)"
