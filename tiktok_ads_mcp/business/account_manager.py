@@ -60,13 +60,14 @@ class AdAccountManager:
         self,
         known_store_ids: Set[str],
         authorized_accounts: Optional[List[Dict]] = None,
+        max_concurrent: int = 10,
     ) -> List[Dict]:
         """Incremental scan: find new GMVMAX accounts from BC authorized list.
 
         1. get_authorized_ad_accounts() → all BC accounts (~1000+)
            (or use pre-fetched authorized_accounts to avoid duplicate API call)
         2. Filter: already in discovery_cache → skip
-        3. For each new account: get_gmvmax_store_list(adv_id)
+        3. For each new account: get_gmvmax_store_list(adv_id) (concurrent)
            - Has store → GMVMAX, write to cache
            - No store → "unknown", write to cache (won't rescan)
         4. Return list of newly discovered GMVMAX accounts
@@ -76,7 +77,11 @@ class AdAccountManager:
 
         authorized_accounts: pre-fetched list from get_authorized_ad_accounts().
         If None, fetches from API (costs one API call).
+
+        max_concurrent: max parallel store_list API calls (default 10).
         """
+        import asyncio
+
         if not self.discovery_cache:
             return []
 
@@ -103,50 +108,63 @@ class AdAccountManager:
             a["advertiser_id"]: a.get("advertiser_name", "") for a in all_accounts
         }
 
-        # Step 3: Classify each new account
+        # Step 3: Classify accounts concurrently in batches
+        sem = asyncio.Semaphore(max_concurrent)
         discovered = []
-        for adv_id in new_ids:
+
+        async def _classify_one(adv_id: str):
             ad_name = name_map.get(adv_id, "")
-            try:
-                store_data = await get_gmvmax_store_list(self.client, adv_id)
-                stores = store_data.get("store_list", [])
-                if stores:
-                    store_ids = [
-                        s.get("store_id", "") for s in stores if s.get("store_id")
-                    ]
-                    self.discovery_cache.put(
-                        adv_id,
-                        store_ids=store_ids,
-                        ad_type="gmvmax",
-                        ad_name=ad_name,
-                    )
-                    matched = [sid for sid in store_ids if sid in known_store_ids]
-                    unmatched = [sid for sid in store_ids if sid not in known_store_ids]
-                    entry = {
-                        "advertiser_id": adv_id,
-                        "ad_name": ad_name,
-                        "store_ids": store_ids,
-                        "matched_stores": matched,
-                        "unmatched_stores": unmatched,
-                    }
-                    discovered.append(entry)
-                    logger.info(
-                        f"discover: {adv_id} → GMVMAX, "
-                        f"{len(matched)} matched, {len(unmatched)} unmatched stores"
-                    )
-                else:
-                    # No stores → not GMVMAX, mark as unknown to skip next time
-                    self.discovery_cache.put(
-                        adv_id,
-                        store_ids=[],
-                        ad_type="unknown",
-                        ad_name=ad_name,
-                    )
-            except TikTokPermissionError:
-                # No permission → skip, don't cache (might get permission later)
-                logger.debug(f"discover: {adv_id} no permission, skipping")
-            except Exception as e:
-                logger.warning(f"discover: {adv_id} error: {e}")
+            async with sem:
+                try:
+                    store_data = await get_gmvmax_store_list(self.client, adv_id)
+                except TikTokPermissionError:
+                    logger.debug(f"discover: {adv_id} no permission, skipping")
+                    return None
+                except Exception as e:
+                    logger.warning(f"discover: {adv_id} error: {e}")
+                    return None
+
+            stores = store_data.get("store_list", [])
+            if stores:
+                store_ids = [s.get("store_id", "") for s in stores if s.get("store_id")]
+                self.discovery_cache.put(
+                    adv_id,
+                    store_ids=store_ids,
+                    ad_type="gmvmax",
+                    ad_name=ad_name,
+                )
+                matched = [sid for sid in store_ids if sid in known_store_ids]
+                unmatched = [sid for sid in store_ids if sid not in known_store_ids]
+                logger.info(
+                    f"discover: {adv_id} → GMVMAX, "
+                    f"{len(matched)} matched, {len(unmatched)} unmatched stores"
+                )
+                return {
+                    "advertiser_id": adv_id,
+                    "ad_name": ad_name,
+                    "store_ids": store_ids,
+                    "matched_stores": matched,
+                    "unmatched_stores": unmatched,
+                }
+            else:
+                self.discovery_cache.put(
+                    adv_id,
+                    store_ids=[],
+                    ad_type="unknown",
+                    ad_name=ad_name,
+                )
+                return None
+
+        results = await asyncio.gather(
+            *[_classify_one(adv_id) for adv_id in new_ids],
+            return_exceptions=True,
+        )
+
+        for r in results:
+            if isinstance(r, dict):
+                discovered.append(r)
+            elif isinstance(r, Exception):
+                logger.warning(f"discover: unexpected error: {r}")
 
         logger.info(f"discover: done, {len(discovered)} new GMVMAX accounts found")
         return discovered
