@@ -56,10 +56,15 @@ class AdAccountManager:
 
     # ── Account discovery ─────────────────────────────────────────────
 
-    async def discover_new_accounts(self, known_store_ids: Set[str]) -> List[Dict]:
+    async def discover_new_accounts(
+        self,
+        known_store_ids: Set[str],
+        authorized_accounts: Optional[List[Dict]] = None,
+    ) -> List[Dict]:
         """Incremental scan: find new GMVMAX accounts from BC authorized list.
 
         1. get_authorized_ad_accounts() → all BC accounts (~1000+)
+           (or use pre-fetched authorized_accounts to avoid duplicate API call)
         2. Filter: already in discovery_cache → skip
         3. For each new account: get_gmvmax_store_list(adv_id)
            - Has store → GMVMAX, write to cache
@@ -68,6 +73,9 @@ class AdAccountManager:
 
         known_store_ids: set of store_ids from static config (STORE_PRODUCT_GROUP).
         Used to tag matched vs unmatched stores in the result.
+
+        authorized_accounts: pre-fetched list from get_authorized_ad_accounts().
+        If None, fetches from API (costs one API call).
         """
         if not self.discovery_cache:
             return []
@@ -75,8 +83,11 @@ class AdAccountManager:
         from ..tools.get_authorized_ad_accounts import get_authorized_ad_accounts
         from ..tools.gmvmax_store_list import get_gmvmax_store_list
 
-        # Step 1: Get all BC authorized accounts
-        all_accounts = await get_authorized_ad_accounts(self.client)
+        # Step 1: Get all BC authorized accounts (reuse if provided)
+        if authorized_accounts is None:
+            all_accounts = await get_authorized_ad_accounts(self.client)
+        else:
+            all_accounts = authorized_accounts
         all_ids = {a["advertiser_id"] for a in all_accounts}
 
         # Step 2: Filter to unknown accounts
