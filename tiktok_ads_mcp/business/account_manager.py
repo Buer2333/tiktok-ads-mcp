@@ -381,7 +381,23 @@ class AdAccountManager:
                 return cached
             return zero
 
-        # Not banned, or banned + today: try API
+        # Banned + today: skip API if banned before today (no spend possible)
+        if banned and period == "today":
+            ban_info = (
+                self.ban_status_cache.get_status(advertiser_id)
+                if self.ban_status_cache
+                else None
+            )
+            if ban_info:
+                detected_at = ban_info.get("detected_at", "")
+                if detected_at and detected_at < date_str:
+                    logger.info(
+                        f"{ad_type} ...{advertiser_id[-6:]}: "
+                        f"$0 (banned since {detected_at}, skipping today)"
+                    )
+                    return zero
+
+        # Not banned, or banned + today (same-day ban): try API
         try:
             m = await self._fetch_single_report(
                 advertiser_id,

@@ -63,7 +63,13 @@ class TikTokAdsClient:
             return f"{self.base_url}/{self.api_version}/{endpoint}?{query_string}"
         return f"{self.base_url}/{self.api_version}/{endpoint}"
 
-    @httpx_retry()
+    @httpx_retry(
+        retryable_exceptions=(
+            httpx.RequestError,
+            httpx.HTTPStatusError,
+            TikTokRateLimitError,
+        )
+    )
     async def _do_request(
         self,
         token: str,
