@@ -51,8 +51,8 @@ class TikTokAdsClient:
 
         # Cache: advertiser_id -> token index (which token works)
         self._token_map: Dict[str, int] = {}
-        # Concurrency limiter for API calls
-        self._semaphore = asyncio.Semaphore(3)
+        # Concurrency limiter for API calls (429 retry handles bursts)
+        self._semaphore = asyncio.Semaphore(5)
 
         n = len(self.tokens)
         logger.info(f"TikTok API client initialized with {n} token(s)")
