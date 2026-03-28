@@ -1,17 +1,26 @@
-"""Core business logic: ban detection, cached fetch, balance tracking.
+"""Core business logic: ban detection, cached fetch, balance tracking, discovery.
 
-AdAccountManager holds a TikTokAdsClient and three caches.
+AdAccountManager holds a TikTokAdsClient and four caches.
 All TikTok API interaction goes through the client (dual-token fallback,
 retry, semaphore). Caches are injected so callers control file paths.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional, Set
 
 from ..client import TikTokAdsClient, TikTokPermissionError
-from ..cache import AdCostCache, BanStatusCache, BalanceSnapshotCache
+from ..cache import (
+    AdCostCache,
+    BanStatusCache,
+    BalanceSnapshotCache,
+)
+
+if TYPE_CHECKING:
+    from ..cache import AccountDiscoveryCache
 
 logger = logging.getLogger(__name__)
 
@@ -26,12 +35,14 @@ class AdAccountManager:
         ban_status_cache: Optional[BanStatusCache] = None,
         balance_cache: Optional[BalanceSnapshotCache] = None,
         client_factory=None,
+        discovery_cache: Optional["AccountDiscoveryCache"] = None,
     ):
         self._client = client
         self._client_factory = client_factory
         self.ad_cost_cache = ad_cost_cache
         self.ban_status_cache = ban_status_cache
         self.balance_cache = balance_cache
+        self.discovery_cache = discovery_cache
 
     @property
     def client(self) -> TikTokAdsClient:
@@ -42,6 +53,92 @@ class AdAccountManager:
             else:
                 self._client = TikTokAdsClient()
         return self._client
+
+    # ── Account discovery ─────────────────────────────────────────────
+
+    async def discover_new_accounts(self, known_store_ids: Set[str]) -> List[Dict]:
+        """Incremental scan: find new GMVMAX accounts from BC authorized list.
+
+        1. get_authorized_ad_accounts() → all BC accounts (~1000+)
+        2. Filter: already in discovery_cache → skip
+        3. For each new account: get_gmvmax_store_list(adv_id)
+           - Has store → GMVMAX, write to cache
+           - No store → "unknown", write to cache (won't rescan)
+        4. Return list of newly discovered GMVMAX accounts
+
+        known_store_ids: set of store_ids from static config (STORE_PRODUCT_GROUP).
+        Used to tag matched vs unmatched stores in the result.
+        """
+        if not self.discovery_cache:
+            return []
+
+        from ..tools.get_authorized_ad_accounts import get_authorized_ad_accounts
+        from ..tools.gmvmax_store_list import get_gmvmax_store_list
+
+        # Step 1: Get all BC authorized accounts
+        all_accounts = await get_authorized_ad_accounts(self.client)
+        all_ids = {a["advertiser_id"] for a in all_accounts}
+
+        # Step 2: Filter to unknown accounts
+        new_ids = self.discovery_cache.get_unknown_ids(all_ids)
+        if not new_ids:
+            logger.info("discover: no new accounts found")
+            return []
+
+        logger.info(f"discover: {len(new_ids)} new accounts to classify")
+
+        # Build name lookup from authorized list
+        name_map = {
+            a["advertiser_id"]: a.get("advertiser_name", "") for a in all_accounts
+        }
+
+        # Step 3: Classify each new account
+        discovered = []
+        for adv_id in new_ids:
+            ad_name = name_map.get(adv_id, "")
+            try:
+                store_data = await get_gmvmax_store_list(self.client, adv_id)
+                stores = store_data.get("store_list", [])
+                if stores:
+                    store_ids = [
+                        s.get("store_id", "") for s in stores if s.get("store_id")
+                    ]
+                    self.discovery_cache.put(
+                        adv_id,
+                        store_ids=store_ids,
+                        ad_type="gmvmax",
+                        ad_name=ad_name,
+                    )
+                    matched = [sid for sid in store_ids if sid in known_store_ids]
+                    unmatched = [sid for sid in store_ids if sid not in known_store_ids]
+                    entry = {
+                        "advertiser_id": adv_id,
+                        "ad_name": ad_name,
+                        "store_ids": store_ids,
+                        "matched_stores": matched,
+                        "unmatched_stores": unmatched,
+                    }
+                    discovered.append(entry)
+                    logger.info(
+                        f"discover: {adv_id} → GMVMAX, "
+                        f"{len(matched)} matched, {len(unmatched)} unmatched stores"
+                    )
+                else:
+                    # No stores → not GMVMAX, mark as unknown to skip next time
+                    self.discovery_cache.put(
+                        adv_id,
+                        store_ids=[],
+                        ad_type="unknown",
+                        ad_name=ad_name,
+                    )
+            except TikTokPermissionError:
+                # No permission → skip, don't cache (might get permission later)
+                logger.debug(f"discover: {adv_id} no permission, skipping")
+            except Exception as e:
+                logger.warning(f"discover: {adv_id} error: {e}")
+
+        logger.info(f"discover: done, {len(discovered)} new GMVMAX accounts found")
+        return discovered
 
     # ── Probe account status ─────────────────────────────────────────
 

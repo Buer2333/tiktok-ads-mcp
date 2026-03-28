@@ -7,5 +7,11 @@ Designed to be used as library code via Python import, not as MCP tools.
 from .ad_cost import AdCostCache
 from .ban_status import BanStatusCache
 from .balance_snapshot import BalanceSnapshotCache
+from .account_discovery import AccountDiscoveryCache
 
-__all__ = ["AdCostCache", "BanStatusCache", "BalanceSnapshotCache"]
+__all__ = [
+    "AdCostCache",
+    "BanStatusCache",
+    "BalanceSnapshotCache",
+    "AccountDiscoveryCache",
+]
