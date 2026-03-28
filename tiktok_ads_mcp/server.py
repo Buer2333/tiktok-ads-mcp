@@ -36,6 +36,7 @@ from .tools import (
     get_bc_budget_changelog,
     get_gmvmax_store_list,
     get_advertiser_balance,
+    get_identities,
 )
 
 # Setup logging
@@ -100,6 +101,33 @@ async def get_business_centers_tool(
 
     return json.dumps(
         {"success": True, "count": len(centers), "centers": centers}, indent=2
+    )
+
+
+@app.tool()
+@handle_errors
+async def get_identities_tool(
+    advertiser_id: str,
+    identity_type: str = "",
+    identity_authorized_bc_id: str = "",
+    page: int = 1,
+    page_size: int = 100,
+) -> str:
+    """Get TikTok identities (creator accounts) authorized to an advertiser. identity_type: CUSTOMIZED_USER, AUTH_CODE, TT_USER, BC_AUTH_TT. For BC_AUTH_TT, identity_authorized_bc_id is required."""
+    if not advertiser_id:
+        raise ValueError("advertiser_id is required")
+    client = get_tiktok_client()
+    identities = await get_identities(
+        client,
+        advertiser_id=advertiser_id,
+        identity_type=identity_type or None,
+        identity_authorized_bc_id=identity_authorized_bc_id or None,
+        page=page,
+        page_size=page_size,
+    )
+    return json.dumps(
+        {"success": True, "count": len(identities), "identities": identities},
+        indent=2,
     )
 
 

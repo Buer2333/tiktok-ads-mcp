@@ -18,6 +18,7 @@ from .bc_transactions import get_bc_transactions
 from .bc_budget_changelog import get_bc_budget_changelog
 from .gmvmax_store_list import get_gmvmax_store_list
 from .advertiser_balance import get_advertiser_balance
+from .get_identities import get_identities
 from .gmvmax_report_aligned import get_gmvmax_report_aligned
 from .ads_report_aligned import get_ads_report_aligned
 from .range_reports import get_gmvmax_range_report, get_ads_range_report
@@ -41,6 +42,7 @@ __all__ = [
     "get_bc_budget_changelog",
     "get_gmvmax_store_list",
     "get_advertiser_balance",
+    "get_identities",
     "get_gmvmax_report_aligned",
     "get_ads_report_aligned",
     "get_gmvmax_range_report",
