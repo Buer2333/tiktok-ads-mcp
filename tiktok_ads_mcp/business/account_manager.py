@@ -164,12 +164,23 @@ class AdAccountManager:
 
         # Phase 2: non-exclusive GMVMAX accounts via campaign_info
         all_authorized_ids = {a["advertiser_id"] for a in authorized_accounts}
-        cached_ids = set(self.discovery_cache.get_all_gmvmax().keys())
-        # Also skip accounts already cached as "unknown" (checked recently)
         all_cached = (
             set(self.discovery_cache._load().keys()) if self.discovery_cache else set()
         )
         unknown_ids = all_authorized_ids - exclusive_ids - all_cached
+
+        # Bulk seed: if too many unknowns (cold start), seed them as "unknown"
+        # without API calls. Phase 1 (store_list) already found the GMVMAX ones.
+        # Phase 2 only needs to check small deltas (newly authorized accounts).
+        _BULK_SEED_THRESHOLD = 50
+        if len(unknown_ids) > _BULK_SEED_THRESHOLD:
+            logger.info(
+                f"discover: bulk-seeding {len(unknown_ids)} authorized accounts "
+                f"as 'unknown' (cold start, skipping Phase 2 API calls)"
+            )
+            for adv_id in unknown_ids:
+                self.discovery_cache.put(adv_id, store_ids=[], ad_type="unknown")
+            unknown_ids = set()  # All seeded, no Phase 2 needed
 
         if unknown_ids:
             phase2 = await self._discover_via_campaigns(unknown_ids, known_store_ids)
