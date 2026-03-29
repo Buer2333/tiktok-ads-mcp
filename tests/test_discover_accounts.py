@@ -252,3 +252,161 @@ class TestDiscoverNewAccounts:
         assert discovery_cache.get("ADV3")["banned"] is True
         # ADV4 should be cached but not returned
         assert discovery_cache.get("ADV4")["store_ids"] == ["S_NEW"]
+
+
+class TestDiscoverViaCampaigns:
+    """Phase 2: discover non-exclusive GMVMAX accounts via campaign_info."""
+
+    @pytest.mark.asyncio
+    async def test_discovers_non_exclusive_via_campaign(self, manager, discovery_cache):
+        """Account not in store_list exclusive but has GMVMAX campaign → discovered."""
+        # Phase 1: ADV1 is exclusive on S1
+        store_resp = _make_store_list(
+            ("S1", "Store One", "ADV1", "Account-1", "STATUS_ENABLE"),
+        )
+        # ADV2 is authorized but not exclusive — has a campaign on S1
+        campaigns_resp = {
+            "campaigns": [
+                {
+                    "campaign_id": "C1",
+                    "campaign_name": "Test Campaign",
+                    "operation_status": "ENABLE",
+                }
+            ]
+        }
+        campaign_info_resp = {"info": {"store_id": "S1"}}
+
+        with (
+            patch(
+                "tiktok_ads_mcp.tools.gmvmax_store_list.get_gmvmax_store_list",
+                new_callable=AsyncMock,
+                return_value=store_resp,
+            ),
+            patch(
+                "tiktok_ads_mcp.tools.gmvmax_campaigns.get_gmvmax_campaigns",
+                new_callable=AsyncMock,
+                return_value=campaigns_resp,
+            ),
+            patch(
+                "tiktok_ads_mcp.tools.gmvmax_campaign_info.get_gmvmax_campaign_info",
+                new_callable=AsyncMock,
+                return_value=campaign_info_resp,
+            ),
+        ):
+            result = await manager.discover_new_accounts(
+                known_store_ids={"S1"},
+                authorized_accounts=_make_authorized(["ADV1", "ADV2"]),
+            )
+
+        adv_ids = {r["advertiser_id"] for r in result}
+        assert "ADV2" in adv_ids
+        # ADV2 cached with correct store
+        entry = discovery_cache.get("ADV2")
+        assert entry["store_ids"] == ["S1"]
+        assert entry["ad_type"] == "gmvmax"
+
+    @pytest.mark.asyncio
+    async def test_non_gmvmax_cached_as_unknown(self, manager, discovery_cache):
+        """Account with no GMVMAX campaigns → cached as unknown, not returned."""
+        store_resp = _make_store_list(
+            ("S1", "Store One", "ADV1", "Account-1", "STATUS_ENABLE"),
+        )
+        no_campaigns = {"campaigns": []}
+
+        with (
+            patch(
+                "tiktok_ads_mcp.tools.gmvmax_store_list.get_gmvmax_store_list",
+                new_callable=AsyncMock,
+                return_value=store_resp,
+            ),
+            patch(
+                "tiktok_ads_mcp.tools.gmvmax_campaigns.get_gmvmax_campaigns",
+                new_callable=AsyncMock,
+                return_value=no_campaigns,
+            ),
+        ):
+            result = await manager.discover_new_accounts(
+                known_store_ids={"S1"},
+                authorized_accounts=_make_authorized(["ADV1", "ADV_ADS"]),
+            )
+
+        # ADV_ADS is not returned (not GMVMAX)
+        adv_ids = {r["advertiser_id"] for r in result}
+        assert "ADV_ADS" not in adv_ids
+        # But cached as unknown to avoid re-checking
+        entry = discovery_cache.get("ADV_ADS")
+        assert entry["ad_type"] == "unknown"
+
+    @pytest.mark.asyncio
+    async def test_already_cached_skips_phase2(self, manager, discovery_cache):
+        """Account already in cache → not re-checked in Phase 2."""
+        discovery_cache.put("ADV2", store_ids=["S1"], ad_type="gmvmax")
+
+        store_resp = _make_store_list(
+            ("S1", "Store One", "ADV1", "Account-1", "STATUS_ENABLE"),
+        )
+
+        with (
+            patch(
+                "tiktok_ads_mcp.tools.gmvmax_store_list.get_gmvmax_store_list",
+                new_callable=AsyncMock,
+                return_value=store_resp,
+            ) as mock_store,
+            patch(
+                "tiktok_ads_mcp.tools.gmvmax_campaigns.get_gmvmax_campaigns",
+                new_callable=AsyncMock,
+            ) as mock_campaigns,
+        ):
+            result = await manager.discover_new_accounts(
+                known_store_ids={"S1"},
+                authorized_accounts=_make_authorized(["ADV1", "ADV2"]),
+            )
+
+        # Phase 2 should not have been called for ADV2
+        mock_campaigns.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_two_accounts_same_store(self, manager, discovery_cache):
+        """Two GMVMAX accounts on same store: one exclusive, one via campaign."""
+        store_resp = _make_store_list(
+            ("S1", "Store One", "ADV1", "Exclusive-Account", "STATUS_ENABLE"),
+        )
+        campaigns_resp = {
+            "campaigns": [
+                {
+                    "campaign_id": "C1",
+                    "campaign_name": "Second Account",
+                    "operation_status": "ENABLE",
+                }
+            ]
+        }
+        campaign_info_resp = {"info": {"store_id": "S1"}}
+
+        with (
+            patch(
+                "tiktok_ads_mcp.tools.gmvmax_store_list.get_gmvmax_store_list",
+                new_callable=AsyncMock,
+                return_value=store_resp,
+            ),
+            patch(
+                "tiktok_ads_mcp.tools.gmvmax_campaigns.get_gmvmax_campaigns",
+                new_callable=AsyncMock,
+                return_value=campaigns_resp,
+            ),
+            patch(
+                "tiktok_ads_mcp.tools.gmvmax_campaign_info.get_gmvmax_campaign_info",
+                new_callable=AsyncMock,
+                return_value=campaign_info_resp,
+            ),
+        ):
+            result = await manager.discover_new_accounts(
+                known_store_ids={"S1"},
+                authorized_accounts=_make_authorized(["ADV1", "ADV2"]),
+            )
+
+        # Both discovered
+        adv_ids = {r["advertiser_id"] for r in result}
+        assert adv_ids == {"ADV1", "ADV2"}
+        # Both cached with same store
+        assert discovery_cache.get("ADV1")["store_ids"] == ["S1"]
+        assert discovery_cache.get("ADV2")["store_ids"] == ["S1"]

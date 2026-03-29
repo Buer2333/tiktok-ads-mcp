@@ -61,11 +61,13 @@ class AdAccountManager:
         known_store_ids: Set[str],
         authorized_accounts: Optional[List[Dict]] = None,
     ) -> List[Dict]:
-        """Discover current exclusive GMVMAX advertisers via store_list API.
+        """Discover GMVMAX advertisers via store_list + campaign_info fallback.
 
-        Uses the exclusive_authorized_advertiser_info field from store_list
-        to get the 1:1 mapping of store → active GMVMAX advertiser. This
-        requires only 1 API call (vs scanning 1000+ accounts individually).
+        Phase 1: Uses exclusive_authorized_advertiser_info from store_list
+                 (1 API call, covers accounts that are the sole GMVMAX per store).
+        Phase 2: For authorized accounts NOT found in Phase 1, checks if they
+                 have GMVMAX campaigns → extracts store_id from campaign_info.
+                 Catches non-exclusive accounts (multiple GMVMAX per store).
 
         known_store_ids: set of store_ids from STORE_PRODUCT_GROUP.
         authorized_accounts: pre-fetched list (need any advertiser_id to call API).
@@ -87,7 +89,7 @@ class AdAccountManager:
 
         any_adv_id = authorized_accounts[0]["advertiser_id"]
 
-        # One API call: get all stores with their exclusive GMVMAX advertisers
+        # Phase 1: exclusive GMVMAX advertisers from store_list (1 API call)
         try:
             store_data = await get_gmvmax_store_list(self.client, any_adv_id)
         except Exception as e:
@@ -101,6 +103,7 @@ class AdAccountManager:
         # Parse exclusive advertiser → store mapping (deduplicate by store_id)
         discovered = []
         seen_stores = set()
+        exclusive_ids = set()
         for store in stores:
             sid = store.get("store_id", "")
             if not sid or sid in seen_stores:
@@ -112,6 +115,7 @@ class AdAccountManager:
             if not exc_adv_id:
                 continue
 
+            exclusive_ids.add(exc_adv_id)
             exc_name = exclusive.get("advertiser_name", "")
             exc_status = exclusive.get("advertiser_status", "")
 
@@ -149,8 +153,113 @@ class AdAccountManager:
                 )
 
         logger.info(
-            f"discover: {len(seen_stores)} stores scanned, "
-            f"{len(discovered)} new/changed accounts"
+            f"discover phase 1: {len(seen_stores)} stores scanned, "
+            f"{len(discovered)} new/changed exclusive accounts"
+        )
+
+        # Phase 2: non-exclusive GMVMAX accounts via campaign_info
+        all_authorized_ids = {a["advertiser_id"] for a in authorized_accounts}
+        cached_ids = set(self.discovery_cache.get_all_gmvmax().keys())
+        # Also skip accounts already cached as "unknown" (checked recently)
+        all_cached = (
+            set(self.discovery_cache._load().keys()) if self.discovery_cache else set()
+        )
+        unknown_ids = all_authorized_ids - exclusive_ids - all_cached
+
+        if unknown_ids:
+            phase2 = await self._discover_via_campaigns(unknown_ids, known_store_ids)
+            discovered.extend(phase2)
+
+        return discovered
+
+    async def _discover_via_campaigns(
+        self,
+        unknown_ids: Set[str],
+        known_store_ids: Set[str],
+    ) -> List[Dict]:
+        """Phase 2: discover non-exclusive GMVMAX accounts via campaign_info.
+
+        For each unknown authorized account:
+        1. get_gmvmax_campaigns(page_size=1) — check if GMVMAX account
+        2. If yes: get_gmvmax_campaign_info → extract store_id
+        3. Cache result (gmvmax or unknown) to avoid re-checking
+
+        Returns list of newly discovered accounts on known stores.
+        """
+        from ..tools.gmvmax_campaigns import get_gmvmax_campaigns
+        from ..tools.gmvmax_campaign_info import get_gmvmax_campaign_info
+
+        discovered = []
+        checked = 0
+
+        for adv_id in unknown_ids:
+            try:
+                # Step 1: check if account has any GMVMAX campaigns
+                result = await get_gmvmax_campaigns(self.client, adv_id, page_size=1)
+                campaigns = result.get("campaigns", [])
+
+                if not campaigns:
+                    # Not a GMVMAX account — cache as "unknown" to skip next time
+                    self.discovery_cache.put(adv_id, store_ids=[], ad_type="unknown")
+                    continue
+
+                # Step 2: get store_id from campaign_info
+                camp_id = campaigns[0]["campaign_id"]
+                info = await get_gmvmax_campaign_info(self.client, adv_id, camp_id)
+                store_id = info.get("info", {}).get("store_id", "")
+
+                if not store_id:
+                    self.discovery_cache.put(
+                        adv_id,
+                        store_ids=[],
+                        ad_type="gmvmax",
+                        ad_name=campaigns[0].get("campaign_name", ""),
+                    )
+                    logger.info(
+                        f"discover phase 2: {adv_id} has campaigns but no store_id"
+                    )
+                    continue
+
+                # Step 3: cache and report
+                camp_status = campaigns[0].get("operation_status", "")
+                existing = self.discovery_cache.get(adv_id)
+                is_new = existing is None or existing.get("ad_type") != "gmvmax"
+                was_different_store = existing and existing.get("store_ids") != [
+                    store_id
+                ]
+
+                self.discovery_cache.put(
+                    adv_id,
+                    store_ids=[store_id],
+                    ad_type="gmvmax",
+                    ad_name=campaigns[0].get("campaign_name", ""),
+                )
+
+                if store_id in known_store_ids and (is_new or was_different_store):
+                    discovered.append(
+                        {
+                            "advertiser_id": adv_id,
+                            "ad_name": campaigns[0].get("campaign_name", ""),
+                            "store_ids": [store_id],
+                            "status": camp_status,
+                        }
+                    )
+                    logger.info(
+                        f"discover phase 2: {adv_id} → store {store_id} "
+                        f"(non-exclusive, {camp_status})"
+                    )
+
+                checked += 1
+            except TikTokPermissionError:
+                # No access — mark as unknown
+                self.discovery_cache.put(adv_id, store_ids=[], ad_type="unknown")
+            except Exception as e:
+                logger.debug(f"discover phase 2: {adv_id} error: {e}")
+                continue
+
+        logger.info(
+            f"discover phase 2: {len(unknown_ids)} unknown accounts checked, "
+            f"{checked} GMVMAX found, {len(discovered)} on known stores"
         )
         return discovered
 
