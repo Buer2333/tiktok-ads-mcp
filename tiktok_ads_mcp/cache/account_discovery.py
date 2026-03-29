@@ -108,11 +108,14 @@ class AccountDiscoveryCache:
             self._save()
 
     def mark_banned(self, advertiser_id: str):
-        """Mark a discovered account as banned."""
+        """Mark a discovered account as banned (records banned_at date)."""
+        today = date.today().isoformat()
         with self._lock:
             cache = self._load()
             if advertiser_id in cache:
                 cache[advertiser_id]["banned"] = True
+                if not cache[advertiser_id].get("banned_at"):
+                    cache[advertiser_id]["banned_at"] = today
                 self._save()
 
     def mark_seen(self, advertiser_id: str):
@@ -153,6 +156,30 @@ class AccountDiscoveryCache:
                         "banned": acct.get("banned", False),
                     }
             self._save()
+
+    def prune_stale_banned(self, max_days: int = 60) -> int:
+        """Remove accounts banned for more than max_days.
+
+        These accounts won't be reused — their data is stale.
+        Uses banned_at if available, falls back to last_seen.
+        """
+        from datetime import timedelta
+
+        cutoff = (date.today() - timedelta(days=max_days)).isoformat()
+        with self._lock:
+            cache = self._load()
+            to_remove = []
+            for adv_id, entry in cache.items():
+                if not entry.get("banned"):
+                    continue
+                ban_date = entry.get("banned_at") or entry.get("last_seen", "")
+                if ban_date and ban_date < cutoff:
+                    to_remove.append(adv_id)
+            for adv_id in to_remove:
+                del cache[adv_id]
+            if to_remove:
+                self._save()
+            return len(to_remove)
 
     def clear(self):
         """Clear all cached data."""

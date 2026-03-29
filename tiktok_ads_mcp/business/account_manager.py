@@ -75,6 +75,11 @@ class AdAccountManager:
         if not self.discovery_cache:
             return []
 
+        # Prune accounts banned > 60 days — they won't be reused
+        pruned = self.discovery_cache.prune_stale_banned(max_days=60)
+        if pruned:
+            logger.info(f"discover: pruned {pruned} stale banned accounts (>60d)")
+
         from ..tools.gmvmax_store_list import get_gmvmax_store_list
 
         # Need any advertiser_id to call store_list (returns BC-wide data)
