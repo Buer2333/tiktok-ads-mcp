@@ -118,6 +118,25 @@ class AccountDiscoveryCache:
                     cache[advertiser_id]["banned_at"] = today
                 self._save()
 
+    def get_stale_unknowns(self, max_days: int = 14) -> Set[str]:
+        """Return 'unknown' accounts not re-checked in max_days.
+
+        These need periodic re-validation: an account seeded as 'unknown'
+        may have become GMVMAX since (e.g., bound to a store after seed).
+        """
+        from datetime import timedelta
+
+        cutoff = (date.today() - timedelta(days=max_days)).isoformat()
+        with self._lock:
+            cache = self._load()
+            return {
+                adv_id
+                for adv_id, entry in cache.items()
+                if entry.get("ad_type") == "unknown"
+                and not entry.get("banned")
+                and entry.get("last_seen", "") < cutoff
+            }
+
     def mark_seen(self, advertiser_id: str):
         """Update last_seen timestamp for an account."""
         today = date.today().isoformat()

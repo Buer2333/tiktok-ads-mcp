@@ -182,6 +182,18 @@ class AdAccountManager:
                 self.discovery_cache.put(adv_id, store_ids=[], ad_type="unknown")
             unknown_ids = set()  # All seeded, no Phase 2 needed
 
+        # Re-validate stale "unknown" entries (>14d since last check):
+        # accounts seeded as "unknown" may have become GMVMAX since.
+        stale = self.discovery_cache.get_stale_unknowns(max_days=14)
+        # Only re-check accounts still authorized (skip revoked ones)
+        stale_authorized = stale & all_authorized_ids
+        if stale_authorized:
+            logger.info(
+                f"discover: {len(stale_authorized)} stale unknowns "
+                f"due for re-validation (>14d)"
+            )
+            unknown_ids |= stale_authorized
+
         if unknown_ids:
             phase2 = await self._discover_via_campaigns(unknown_ids, known_store_ids)
             discovered.extend(phase2)
