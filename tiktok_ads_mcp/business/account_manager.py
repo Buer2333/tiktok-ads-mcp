@@ -172,6 +172,8 @@ class AdAccountManager:
 
         return discovered
 
+    _PHASE2_BATCH_LIMIT = 20  # Max accounts to check per run (cache builds up)
+
     async def _discover_via_campaigns(
         self,
         unknown_ids: Set[str],
@@ -184,15 +186,26 @@ class AdAccountManager:
         2. If yes: get_gmvmax_campaign_info → extract store_id
         3. Cache result (gmvmax or unknown) to avoid re-checking
 
+        Capped at _PHASE2_BATCH_LIMIT per run to avoid timeout/rate-limit.
+        Cache persists, so all accounts get checked over multiple runs.
+
         Returns list of newly discovered accounts on known stores.
         """
-        from ..tools.gmvmax_campaigns import get_gmvmax_campaigns
+        from ..client import TikTokRateLimitError
         from ..tools.gmvmax_campaign_info import get_gmvmax_campaign_info
+        from ..tools.gmvmax_campaigns import get_gmvmax_campaigns
 
         discovered = []
         checked = 0
+        batch = list(unknown_ids)[: self._PHASE2_BATCH_LIMIT]
 
-        for adv_id in unknown_ids:
+        if len(unknown_ids) > self._PHASE2_BATCH_LIMIT:
+            logger.info(
+                f"discover phase 2: {len(unknown_ids)} unknown, "
+                f"checking {len(batch)} this run (batch limit)"
+            )
+
+        for adv_id in batch:
             try:
                 # Step 1: check if account has any GMVMAX campaigns
                 result = await get_gmvmax_campaigns(self.client, adv_id, page_size=1)
@@ -253,13 +266,21 @@ class AdAccountManager:
             except TikTokPermissionError:
                 # No access — mark as unknown
                 self.discovery_cache.put(adv_id, store_ids=[], ad_type="unknown")
+            except TikTokRateLimitError:
+                logger.warning(
+                    f"discover phase 2: rate limited after {checked} checks, "
+                    f"stopping (will resume next run)"
+                )
+                break
             except Exception as e:
                 logger.debug(f"discover phase 2: {adv_id} error: {e}")
                 continue
 
+        remaining = len(unknown_ids) - len(batch)
         logger.info(
-            f"discover phase 2: {len(unknown_ids)} unknown accounts checked, "
+            f"discover phase 2: checked {len(batch)}/{len(unknown_ids)}, "
             f"{checked} GMVMAX found, {len(discovered)} on known stores"
+            + (f", {remaining} deferred to next run" if remaining > 0 else "")
         )
         return discovered
 
