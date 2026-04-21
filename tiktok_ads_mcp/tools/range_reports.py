@@ -49,7 +49,13 @@ async def get_gmvmax_range_report(
         }
         response = await client._make_request("GET", "gmv_max/report/get/", params)
         if response.get("code") != 0:
-            break
+            # Surface instead of silently returning partial data. Same rationale
+            # as _fetch_hourly in gmvmax_report_aligned.py.
+            raise Exception(
+                f"gmv_max/report/get/ returned code={response.get('code')} "
+                f"msg={response.get('message')!r} for advertiser={advertiser_id} "
+                f"range={start_date}~{end_date}"
+            )
 
         items = response.get("data", {}).get("list", [])
         for item in items:

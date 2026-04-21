@@ -41,7 +41,13 @@ async def _fetch_hourly(
     response = await client._make_request("GET", "gmv_max/report/get/", params)
     if response.get("code") == 0:
         return response.get("data", {}).get("list", [])
-    return []
+    # Non-0 code: surface so caller (and @api_retry) can react instead of
+    # silently treating as "no data". 2026-04-21 bug: swallowed non-0 responses
+    # caused 4/5 groups to under-report today cost by $50-$1610 simultaneously.
+    raise Exception(
+        f"gmv_max/report/get/ returned code={response.get('code')} "
+        f"msg={response.get('message')!r} for advertiser={advertiser_id} date={date_str}"
+    )
 
 
 @api_retry(
