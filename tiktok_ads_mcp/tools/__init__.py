@@ -22,6 +22,7 @@ from .get_identities import get_identities
 from .gmvmax_report_aligned import get_gmvmax_report_aligned
 from .ads_report_aligned import get_ads_report_aligned
 from .range_reports import get_gmvmax_range_report, get_ads_range_report
+from .discovery_trending import get_trending_list
 
 __all__ = [
     "get_business_centers",
@@ -47,4 +48,5 @@ __all__ = [
     "get_ads_report_aligned",
     "get_gmvmax_range_report",
     "get_ads_range_report",
+    "get_trending_list",
 ]

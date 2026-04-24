@@ -69,7 +69,7 @@ Required environment variables:
 
 ## Available Tools
 
-The MCP server provides 6 comprehensive tools:
+The MCP server provides 7 comprehensive tools:
 
 1. **get_business_centers** - Retrieve business centers
 2. **get_authorized_ad_accounts** - Get authorized advertiser accounts
@@ -77,6 +77,7 @@ The MCP server provides 6 comprehensive tools:
 4. **get_ad_groups** - Get ad groups with comprehensive filtering
 5. **get_ads** - Retrieve ads with detailed filtering options
 6. **get_reports** - Generate performance reports and analytics
+7. **get_trending_list_tool** - Get trending hashtags via TikTok Discovery API
 
 ## Tool Reference
 
@@ -395,6 +396,59 @@ Generates comprehensive performance reports and analytics.
         "clicks": "52",
         "ctr": "1.49"
       }
+    }
+  ]
+}
+```
+
+### 7. get_trending_list_tool
+
+Returns trending hashtags from TikTok Discovery API (`/discovery/trending_list/`).
+
+**Parameters:**
+- `advertiser_id` (required): TikTok advertiser ID (used for auth scope)
+- `discovery_type` (optional): `"HASHTAG"` (default; only confirmed value)
+- `country_code` (optional): Two-letter country code, e.g. `"US"` (default: `"US"`)
+- `date_range` (optional): `"7DAY"` or `"30DAY"` (default: `"7DAY"`)
+- `category_id` (optional): Numeric category filter
+- `page_size` (optional): Number of results to return
+- `include_history` (optional): If `true`, include per-day `trending_history` in each item (default: `false`)
+
+**Response fields per item:**
+- `hashtag_id`, `hashtag_name` — unique identifier and display name
+- `rank_position` — current rank (string, e.g. `"1"`)
+- `rank_change` — rank change vs previous period (string)
+- `posts` — number of posts in the selected date range
+- `views` — total views in the selected date range
+- `top_country_list` — countries where the hashtag is popular
+- `trending_history` — (only if `include_history=true`) list of `{date, rank_position_daily, views_daily}`
+
+**Example request:**
+```json
+{
+  "advertiser_id": "7319310593524023298",
+  "discovery_type": "HASHTAG",
+  "country_code": "US",
+  "date_range": "7DAY",
+  "page_size": 20
+}
+```
+
+**Example response:**
+```json
+{
+  "success": true,
+  "filter_info": {"category_name": "ALL", "country_code": "US", "date_range": "7DAY"},
+  "count": 20,
+  "trending_list": [
+    {
+      "hashtag_id": "2945811328843",
+      "hashtag_name": "usa",
+      "rank_position": "1",
+      "rank_change": "1",
+      "posts": 607477,
+      "views": 3012345678,
+      "top_country_list": ["US", "PK", "MX"]
     }
   ]
 }

@@ -751,6 +751,44 @@ async def get_ads_range_report_tool(
     return json.dumps({"success": True, **result}, indent=2)
 
 
+@app.tool()
+@handle_errors
+async def get_trending_list_tool(
+    advertiser_id: str,
+    discovery_type: str = "HASHTAG",
+    country_code: str = "US",
+    date_range: str = "7DAY",
+    category_id: Optional[int] = None,
+    page_size: Optional[int] = None,
+    include_history: bool = False,
+) -> str:
+    """Get trending hashtags on TikTok via /discovery/trending_list/. discovery_type: HASHTAG. date_range: 7DAY | 30DAY. country_code: e.g. US. Set include_history=True to get per-day rank/views breakdown."""
+    if not advertiser_id:
+        raise ValueError("advertiser_id is required")
+
+    client = get_tiktok_client()
+    result = await get_trending_list(
+        client,
+        advertiser_id=advertiser_id,
+        discovery_type=discovery_type,
+        country_code=country_code,
+        date_range=date_range,
+        category_id=category_id,
+        page_size=page_size,
+        include_history=include_history,
+    )
+
+    return json.dumps(
+        {
+            "success": True,
+            "filter_info": result.get("filter_info", {}),
+            "count": result.get("count", 0),
+            "trending_list": result.get("trending_list", []),
+        },
+        indent=2,
+    )
+
+
 def main():
     """Main function to run the MCP server"""
     logger.info("Starting TikTok Ads MCP Server...")
