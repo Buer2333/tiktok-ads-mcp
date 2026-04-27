@@ -81,6 +81,79 @@ async def get_gmvmax_range_report(
     max_wait=15,
     retryable_exceptions=(TikTokRateLimitError,),
 )
+async def get_gmvmax_range_report_breakdown(
+    client: TikTokAdsClient,
+    advertiser_id: str,
+    store_ids: List[str],
+    start_date: str,
+    end_date: str,
+) -> Dict[str, Any]:
+    """Per-store GMVMAX date-range breakdown.
+
+    Returns {store_id: {cost, gmv, orders, roi}} so callers route to product
+    groups via STORE_PRODUCT_GROUP without depending on bitable's per-row
+    (advertiser, store) binding being correct.
+    """
+    by_store: Dict[str, Dict[str, float]] = {}
+    page = 1
+
+    while True:
+        params = {
+            "advertiser_id": advertiser_id,
+            "store_ids": json.dumps(store_ids),
+            "start_date": start_date,
+            "end_date": end_date,
+            "dimensions": json.dumps(["store_id"]),
+            "metrics": json.dumps(["cost", "gross_revenue", "orders"]),
+            "page": page,
+            "page_size": 1000,
+        }
+        response = await client._make_request("GET", "gmv_max/report/get/", params)
+        if response.get("code") != 0:
+            raise Exception(
+                f"gmv_max/report/get/ returned code={response.get('code')} "
+                f"msg={response.get('message')!r} for advertiser={advertiser_id} "
+                f"range={start_date}~{end_date}"
+            )
+
+        items = response.get("data", {}).get("list", [])
+        for item in items:
+            dims = item.get("dimensions", {})
+            store_id = str(dims.get("store_id", ""))
+            if not store_id:
+                continue
+            m = item.get("metrics", {})
+            bucket = by_store.setdefault(
+                store_id, {"cost": 0.0, "gmv": 0.0, "orders": 0}
+            )
+            bucket["cost"] += float(m.get("cost", 0))
+            bucket["gmv"] += float(m.get("gross_revenue", 0))
+            bucket["orders"] += int(m.get("orders", 0))
+
+        page_info = response.get("data", {}).get("page_info", {})
+        if page >= page_info.get("total_page", 1) or not items:
+            break
+        page += 1
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for store_id, bucket in by_store.items():
+        cost = bucket["cost"]
+        gmv = bucket["gmv"]
+        out[store_id] = {
+            "cost": round(cost, 2),
+            "gmv": round(gmv, 2),
+            "orders": bucket["orders"],
+            "roi": round(gmv / cost, 2) if cost > 0 else 0.0,
+        }
+    return out
+
+
+@api_retry(
+    max_attempts=3,
+    min_wait=3,
+    max_wait=15,
+    retryable_exceptions=(TikTokRateLimitError,),
+)
 async def get_ads_range_report(
     client: TikTokAdsClient,
     advertiser_id: str,

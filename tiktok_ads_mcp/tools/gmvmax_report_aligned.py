@@ -138,3 +138,121 @@ async def get_gmvmax_report_aligned(
         "roi": roi,
         "hours_included": hours_included,
     }
+
+
+async def _fetch_hourly_breakdown(
+    client: TikTokAdsClient,
+    advertiser_id: str,
+    date_str: str,
+    store_ids: List[str],
+    metrics: List[str],
+) -> List[Dict]:
+    """Fetch one day of hourly GMVMAX data with per-store breakdown.
+
+    Same as _fetch_hourly but adds store_id to dimensions so callers can
+    attribute spend to product groups via STORE_PRODUCT_GROUP without
+    relying on bitable's per-row (advertiser, store) binding being correct.
+    """
+    params = {
+        "advertiser_id": advertiser_id,
+        "start_date": date_str,
+        "end_date": date_str,
+        "dimensions": json.dumps(["store_id", "stat_time_hour"]),
+        "metrics": json.dumps(metrics),
+        "store_ids": json.dumps(store_ids),
+        "page": 1,
+        "page_size": 1000,
+    }
+    response = await client._make_request("GET", "gmv_max/report/get/", params)
+    if response.get("code") == 0:
+        return response.get("data", {}).get("list", [])
+    raise Exception(
+        f"gmv_max/report/get/ returned code={response.get('code')} "
+        f"msg={response.get('message')!r} for advertiser={advertiser_id} date={date_str}"
+    )
+
+
+@api_retry(
+    max_attempts=3,
+    min_wait=3,
+    max_wait=15,
+    retryable_exceptions=(TikTokRateLimitError,),
+)
+async def get_gmvmax_report_aligned_breakdown(
+    client: TikTokAdsClient,
+    advertiser_id: str,
+    date: str,
+    store_ids: List[str],
+    shop_tz: str = "America/Los_Angeles",
+    metrics: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Per-store GMVMAX breakdown aligned to shop timezone.
+
+    Returns per-store metrics so callers route each store's spend to the
+    correct product group via STORE_PRODUCT_GROUP — independent of any
+    operator-maintained bitable (advertiser, store) binding.
+
+    Returns:
+        Dict with date, timezones, breakdown {store_id: {cost, gross_revenue,
+        orders, roi}}, and hours included.
+    """
+    if metrics is None:
+        metrics = list(ALIGNED_DEFAULT_METRICS)
+
+    shop_zone = parse_tz(shop_tz)
+    ad_zone = await _get_ad_tz(client, advertiser_id)
+
+    start_utc, end_utc = day_utc_range(date, shop_zone)
+    now_utc = datetime.now(timezone.utc)
+
+    dates_to_query = native_dates_for_day(date, shop_zone, ad_zone)
+
+    all_rows: List[Dict] = []
+    for d in dates_to_query:
+        rows = await _fetch_hourly_breakdown(
+            client, advertiser_id, d, store_ids, metrics
+        )
+        all_rows.extend(rows)
+
+    # Aggregate per-store
+    by_store: Dict[str, Dict[str, float]] = {}
+    hours_seen: Dict[str, int] = {}
+
+    for row in all_rows:
+        dims = row.get("dimensions", {})
+        hour_str = dims.get("stat_time_hour", "")
+        store_id = str(dims.get("store_id", ""))
+        if not hour_str or not store_id:
+            continue
+
+        utc_dt = hour_to_utc(hour_str, ad_zone)
+        if not (start_utc <= utc_dt < end_utc and utc_dt <= now_utc):
+            continue
+
+        bucket = by_store.setdefault(store_id, {m: 0.0 for m in metrics})
+        row_metrics = row.get("metrics", {})
+        for m in metrics:
+            try:
+                bucket[m] += float(row_metrics.get(m, "0"))
+            except (ValueError, TypeError):
+                pass
+        hours_seen[store_id] = hours_seen.get(store_id, 0) + 1
+
+    breakdown: Dict[str, Dict[str, Any]] = {}
+    for store_id, bucket in by_store.items():
+        cost = bucket.get("cost", 0.0)
+        gmv = bucket.get("gross_revenue", 0.0)
+        breakdown[store_id] = {
+            "cost": round(cost, 2),
+            "gross_revenue": round(gmv, 2),
+            "orders": int(bucket.get("orders", 0)),
+            "roi": round(gmv / cost, 2) if cost > 0 else 0.0,
+            "hours_included": hours_seen.get(store_id, 0),
+        }
+
+    return {
+        "date": date,
+        "shop_tz": shop_tz,
+        "ad_tz": str(ad_zone),
+        "breakdown": breakdown,
+    }

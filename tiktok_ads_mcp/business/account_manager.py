@@ -648,6 +648,121 @@ class AdAccountManager:
                 return cached
             return zero
 
+    # ── Per-store breakdown (decoupled from bitable per-row binding) ──
+
+    async def fetch_gmvmax_breakdown(
+        self,
+        advertiser_id: str,
+        date_str: str,
+        store_ids: List[str],
+        shop_tz: str = "America/Los_Angeles",
+        period: str = "today",
+        banned: bool = False,
+    ) -> Dict[str, Dict]:
+        """Per-store GMVMAX breakdown for one shop-tz day.
+
+        TikTok API limits store_ids to 1 per call, so we query each store
+        independently in parallel and assemble the breakdown. Callers
+        attribute each store's spend to the right product group via
+        STORE_PRODUCT_GROUP, eliminating the bitable (advertiser, store)
+        binding as a routing dependency.
+
+        Returns {store_id: {cost, gmv, orders, roi}}. Stores with no spend
+        are omitted.
+        """
+        import asyncio
+
+        if banned and period != "today":
+            return {}
+        if banned and period == "today":
+            ban_info = (
+                self.ban_status_cache.get_status(advertiser_id)
+                if self.ban_status_cache
+                else None
+            )
+            if ban_info:
+                detected_at = ban_info.get("detected_at", "")
+                if detected_at and detected_at < date_str:
+                    return {}
+
+        async def _one(sid):
+            try:
+                m = await self._fetch_single_report(
+                    advertiser_id, "GMVMAX", sid, date_str, shop_tz
+                )
+                return sid, m, None
+            except TikTokPermissionError as e:
+                return sid, None, e
+            except Exception as e:
+                return sid, None, e
+
+        results = await asyncio.gather(*[_one(sid) for sid in store_ids])
+        out: Dict[str, Dict] = {}
+        first_perm_err = None
+        for sid, m, err in results:
+            if err is not None:
+                if isinstance(err, TikTokPermissionError) and first_perm_err is None:
+                    first_perm_err = err
+                continue
+            cost = m.get("cost", 0.0)
+            gmv = m.get("gmv", 0.0)
+            orders = int(m.get("orders", 0))
+            if cost == 0 and gmv == 0 and orders == 0:
+                continue
+            out[sid] = {
+                "cost": cost,
+                "gmv": gmv,
+                "orders": orders,
+                "roi": m.get("roi", 0.0),
+            }
+
+        if not out and first_perm_err is not None:
+            logger.info(f"GMVMAX ...{advertiser_id[-6:]}: no permission across stores")
+        return out
+
+    async def fetch_gmvmax_range_breakdown(
+        self,
+        advertiser_id: str,
+        start: str,
+        end: str,
+        store_ids: List[str],
+        banned: bool = False,
+    ) -> Dict[str, Dict]:
+        """Per-store GMVMAX date-range breakdown. Single-store API loop."""
+        import asyncio
+
+        if banned:
+            return {}
+
+        async def _one(sid):
+            try:
+                m = await self._fetch_range_report(
+                    advertiser_id, "GMVMAX", sid, start, end
+                )
+                return sid, m, None
+            except TikTokPermissionError as e:
+                return sid, None, e
+            except Exception as e:
+                return sid, None, e
+
+        results = await asyncio.gather(*[_one(sid) for sid in store_ids])
+        out: Dict[str, Dict] = {}
+        for sid, m, err in results:
+            if err is not None:
+                continue
+            cost = m.get("cost", 0.0)
+            gmv = m.get("gmv", 0.0)
+            orders = int(m.get("orders", 0))
+            if cost == 0 and gmv == 0 and orders == 0:
+                continue
+            out[sid] = {
+                "cost": cost,
+                "gmv": gmv,
+                "orders": orders,
+                "roi": m.get("roi", 0.0),
+            }
+        return out
+
     # ── Balance ──────────────────────────────────────────────────────
 
     async def get_advertiser_balance(self, advertiser_id: str) -> Dict:
