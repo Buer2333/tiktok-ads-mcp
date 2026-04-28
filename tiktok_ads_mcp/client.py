@@ -26,6 +26,17 @@ class TikTokRateLimitError(Exception):
     pass
 
 
+class TikTokIncompleteDataError(Exception):
+    """Raised when an aligned hourly report returns fewer hours than expected.
+
+    Empirical: TikTok degrades to code=0 + partial-hours list under token-level
+    rate-limit pressure. Detected via hours_included < expected_hours; treated
+    as retryable so the @api_retry decorator backs off and re-fetches.
+    """
+
+    pass
+
+
 class TikTokAdsClient:
     """TikTok Business API client with dual-token fallback."""
 

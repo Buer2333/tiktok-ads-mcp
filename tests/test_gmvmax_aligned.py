@@ -20,6 +20,15 @@ def clear_tz_cache():
     _tz_cache.clear()
 
 
+@pytest.fixture(autouse=True)
+def relax_completeness_tolerance():
+    """Existing tests use 1-2 hourly rows; relax production threshold so they
+    don't have to fabricate full-day data. Completeness logic itself is tested
+    explicitly in test_partial_response_*."""
+    with patch("tiktok_ads_mcp.tools.gmvmax_report_aligned._HOURS_LAG_TOLERANCE", 24):
+        yield
+
+
 @pytest.fixture
 def mock_client():
     client = MagicMock()
@@ -191,3 +200,126 @@ async def test_tz_cache_used_on_second_call(mock_client):
     # Only 1 API call (hourly data), no advertiser/info/ call
     assert mock_client._make_request.call_count == 1
     assert result["hours_included"] == 1
+
+
+# ── Completeness check (incomplete-data retry) ────────────────────────────
+
+
+@pytest.fixture
+def disable_completeness_relax(monkeypatch):
+    """Override the autouse relax fixture so production tolerance applies."""
+    from tiktok_ads_mcp.tools import gmvmax_report_aligned as mod
+
+    monkeypatch.setattr(mod, "_HOURS_LAG_TOLERANCE", 2)
+
+
+@pytest.mark.asyncio
+async def test_partial_response_triggers_retry(mock_client, disable_completeness_relax):
+    """Partial hourly response (1 ≤ hours < threshold) must raise so the
+    @api_retry decorator backs off and re-fetches. This is the 2026-04-28
+    silent-data-loss bug pattern."""
+    from tiktok_ads_mcp.client import TikTokIncompleteDataError
+
+    _tz_cache["123"] = ZoneInfo("UTC")
+
+    # Day far in the past from now's perspective: expected = 24, threshold = 22.
+    # Mock returns only 5 rows → triggers TikTokIncompleteDataError.
+    mock_client._make_request.side_effect = [
+        _hourly_response(
+            [
+                _make_hourly_row(f"2026-03-10 {h:02d}:00:00", 1.0, 5.0, 1)
+                for h in range(5)
+            ]
+        ),
+    ] * 3  # decorator retries up to 3 times — feed identical partial each time
+
+    with patch("tiktok_ads_mcp.tools.gmvmax_report_aligned.datetime") as mock_dt:
+        mock_dt.now.return_value = datetime(2026, 3, 11, 12, 0, tzinfo=timezone.utc)
+        mock_dt.strptime = datetime.strptime
+        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+
+        with pytest.raises(TikTokIncompleteDataError) as exc:
+            await get_gmvmax_report_aligned(
+                mock_client, "123", "2026-03-10", ["store1"], shop_tz="UTC"
+            )
+
+    assert "hours_included=5" in str(exc.value)
+    # Decorator retried 3 times, each consuming 1 mock response
+    assert mock_client._make_request.call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_zero_rows_treated_as_inactive(mock_client, disable_completeness_relax):
+    """Empty list (advertiser had no spend that day) must not trigger retry —
+    it's a legitimate state, not a partial response."""
+    _tz_cache["123"] = ZoneInfo("UTC")
+    mock_client._make_request.side_effect = [_hourly_response([])]
+
+    with patch("tiktok_ads_mcp.tools.gmvmax_report_aligned.datetime") as mock_dt:
+        mock_dt.now.return_value = datetime(2026, 3, 11, 12, 0, tzinfo=timezone.utc)
+        mock_dt.strptime = datetime.strptime
+        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+
+        result = await get_gmvmax_report_aligned(
+            mock_client, "123", "2026-03-10", ["store1"], shop_tz="UTC"
+        )
+
+    assert result["metrics"]["cost"] == 0.0
+    assert result["hours_included"] == 0
+    assert mock_client._make_request.call_count == 1  # no retries
+
+
+@pytest.mark.asyncio
+async def test_complete_response_passes(mock_client, disable_completeness_relax):
+    """Full 24-hour response on a past day — no retry, no exception."""
+    _tz_cache["123"] = ZoneInfo("UTC")
+    mock_client._make_request.side_effect = [
+        _hourly_response(
+            [
+                _make_hourly_row(f"2026-03-10 {h:02d}:00:00", 1.0, 5.0, 1)
+                for h in range(24)
+            ]
+        ),
+    ]
+
+    with patch("tiktok_ads_mcp.tools.gmvmax_report_aligned.datetime") as mock_dt:
+        mock_dt.now.return_value = datetime(2026, 3, 11, 12, 0, tzinfo=timezone.utc)
+        mock_dt.strptime = datetime.strptime
+        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+
+        result = await get_gmvmax_report_aligned(
+            mock_client, "123", "2026-03-10", ["store1"], shop_tz="UTC"
+        )
+
+    assert result["hours_included"] == 24
+    assert result["metrics"]["cost"] == 24.0
+    assert mock_client._make_request.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_today_partial_within_tolerance_passes(
+    mock_client, disable_completeness_relax
+):
+    """Today, 23h elapsed, 22h received — within 2h lag tolerance, no retry."""
+    _tz_cache["123"] = ZoneInfo("UTC")
+    # Shop UTC day 2026-03-10, now=2026-03-10 23:00 UTC → expected=23, threshold=21
+    # Receive 22 hours → passes (22 ≥ 21)
+    mock_client._make_request.side_effect = [
+        _hourly_response(
+            [
+                _make_hourly_row(f"2026-03-10 {h:02d}:00:00", 1.0, 5.0, 1)
+                for h in range(22)
+            ]
+        ),
+    ]
+
+    with patch("tiktok_ads_mcp.tools.gmvmax_report_aligned.datetime") as mock_dt:
+        mock_dt.now.return_value = datetime(2026, 3, 10, 23, 0, tzinfo=timezone.utc)
+        mock_dt.strptime = datetime.strptime
+        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+
+        result = await get_gmvmax_report_aligned(
+            mock_client, "123", "2026-03-10", ["store1"], shop_tz="UTC"
+        )
+
+    assert result["hours_included"] == 22

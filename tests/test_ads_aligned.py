@@ -17,6 +17,14 @@ def clear_tz_cache():
     _tz_cache.clear()
 
 
+@pytest.fixture(autouse=True)
+def relax_completeness_tolerance():
+    """Same rationale as test_gmvmax_aligned.py — existing tests use minimal
+    mock data; completeness check is exercised in dedicated tests."""
+    with patch("tiktok_ads_mcp.tools.ads_report_aligned._HOURS_LAG_TOLERANCE", 24):
+        yield
+
+
 @pytest.fixture
 def mock_client():
     client = MagicMock()
