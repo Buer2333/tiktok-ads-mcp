@@ -147,24 +147,34 @@ async def get_gmvmax_report_aligned(
     # Without this guard, partial data overwrites cache and the next push
     # shows today cost LOWER than an earlier same-day push (2026-04-28
     # incident: 11:01 cost $10,470 → 14:01 cost $8,789 for FN-Shilajit).
-    expected = _expected_hours(date, shop_zone, now_utc)
-    threshold = max(1, expected - _HOURS_LAG_TOLERANCE)
-    # 0 hours_included is treated as "advertiser had no spend that day"
-    # (TikTok may return empty list for inactive accounts) and passes.
-    # Partial responses (1 ≤ hours_included < threshold) are the failure
-    # mode we trap here — they only happen under token rate-limit pressure.
-    if expected > 0 and 0 < hours_included < threshold:
-        raise TikTokIncompleteDataError(
-            f"GMVMAX advertiser={advertiser_id} date={date} stores={store_ids}: "
-            f"hours_included={hours_included} < threshold={threshold} "
-            f"(expected={expected}, tol={_HOURS_LAG_TOLERANCE}) — "
-            f"likely token rate-limit partial response"
-        )
-
-    # Calculate ROI
+    # Calculate aggregated cost first — completeness check below uses it.
     cost = aggregated.get("cost", 0.0)
     gmv = aggregated.get("gross_revenue", 0.0)
     roi = round(gmv / cost, 2) if cost > 0 else 0.0
+
+    # Completeness check: token-level rate-limit on TikTok occasionally
+    # degrades to code=0 + partial-hours list (silent partial response).
+    # Without this guard, partial data overwrites cache and the next push
+    # shows today cost LOWER than an earlier same-day push (2026-04-28
+    # incident: 11:01 cost $10,470 → 14:01 cost $8,789 for FN-Shilajit).
+    #
+    # Two false-positive cases we MUST allow through:
+    #   - hours_included == 0: advertiser had no spend that day (inactive)
+    #   - cost == 0:           same — advertiser exists but didn't spend.
+    #                          TikTok returns variable row count for $0 days
+    #                          (sometimes 12, sometimes 24) and we cannot
+    #                          distinguish that from a partial-cost response.
+    # Only raise when we have *some* cost AND row count is below threshold —
+    # that's the unambiguous fingerprint of a truncated successful response.
+    expected = _expected_hours(date, shop_zone, now_utc)
+    threshold = max(1, expected - _HOURS_LAG_TOLERANCE)
+    if expected > 0 and cost > 0 and 0 < hours_included < threshold:
+        raise TikTokIncompleteDataError(
+            f"GMVMAX advertiser={advertiser_id} date={date} stores={store_ids}: "
+            f"hours_included={hours_included} < threshold={threshold} "
+            f"(expected={expected}, tol={_HOURS_LAG_TOLERANCE}, cost=${cost:.2f}) — "
+            f"likely token rate-limit partial response"
+        )
 
     # Round monetary values
     for m in aggregated:
@@ -278,20 +288,23 @@ async def get_gmvmax_report_aligned_breakdown(
                 pass
         hours_seen[store_id] = hours_seen.get(store_id, 0) + 1
 
-    # Completeness check (per-store): same partial-response failure mode
-    # as get_gmvmax_report_aligned. Per-store hour count must clear the
-    # threshold for each store that returned at least 1 hour, else the
-    # whole call is retried (we cannot tell which store actually saw spend).
+    # Completeness check (per-store): same false-positive guard as the
+    # non-breakdown variant — only flag a store if it had cost > 0 yet
+    # returned fewer rows than expected. Pure-zero stores (inactive on
+    # this day) sometimes return arbitrary row counts and must not retry.
     expected = _expected_hours(date, shop_zone, now_utc)
     threshold = max(1, expected - _HOURS_LAG_TOLERANCE)
-    if expected > 0 and hours_seen:
-        worst_store, worst_hours = min(hours_seen.items(), key=lambda kv: kv[1])
-        if 0 < worst_hours < threshold:
-            raise TikTokIncompleteDataError(
-                f"GMVMAX-breakdown advertiser={advertiser_id} date={date}: "
-                f"store={worst_store} hours={worst_hours} < threshold={threshold} "
-                f"(expected={expected}) — likely token rate-limit partial response"
-            )
+    if expected > 0:
+        for store_id, bucket in by_store.items():
+            store_cost = bucket.get("cost", 0.0)
+            store_hours = hours_seen.get(store_id, 0)
+            if store_cost > 0 and 0 < store_hours < threshold:
+                raise TikTokIncompleteDataError(
+                    f"GMVMAX-breakdown advertiser={advertiser_id} date={date}: "
+                    f"store={store_id} hours={store_hours} < threshold={threshold} "
+                    f"(expected={expected}, cost=${store_cost:.2f}) — "
+                    f"likely token rate-limit partial response"
+                )
 
     breakdown: Dict[str, Dict[str, Any]] = {}
     for store_id, bucket in by_store.items():

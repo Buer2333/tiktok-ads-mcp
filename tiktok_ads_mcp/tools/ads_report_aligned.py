@@ -132,18 +132,19 @@ async def get_ads_report_aligned(
             orders += int(row_metrics.get("onsite_shopping", 0))
             hours_included += 1
 
-    # Completeness check: see gmvmax_report_aligned for the full incident
-    # explanation (TikTok degrades to code=0 + partial-hours under token
-    # rate-limit pressure). Trigger retry instead of silently aggregating.
+    # Completeness check: see gmvmax_report_aligned for the full reasoning.
+    # Only raise when there's evidence of *some* cost AND row count is below
+    # threshold — that's the unambiguous partial-response fingerprint.
+    # Inactive advertisers (cost=0) return arbitrary row counts and must
+    # not be retried (false positive: 2026-04-28 Hi-NAD+ Ads ...192017
+    # had $0 spend on 4/27 but endpoint returned 12 rows → kept raising).
     expected = _expected_hours(date, shop_zone, now_utc)
     threshold = max(1, expected - _HOURS_LAG_TOLERANCE)
-    # See gmvmax_report_aligned: 0 means inactive (acceptable), 1..threshold-1
-    # means partial (retry).
-    if expected > 0 and 0 < hours_included < threshold:
+    if expected > 0 and cost > 0 and 0 < hours_included < threshold:
         raise TikTokIncompleteDataError(
             f"Ads advertiser={advertiser_id} date={date}: "
             f"hours_included={hours_included} < threshold={threshold} "
-            f"(expected={expected}, tol={_HOURS_LAG_TOLERANCE}) — "
+            f"(expected={expected}, tol={_HOURS_LAG_TOLERANCE}, cost=${cost:.2f}) — "
             f"likely token rate-limit partial response"
         )
 

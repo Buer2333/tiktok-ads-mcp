@@ -249,6 +249,39 @@ async def test_partial_response_triggers_retry(mock_client, disable_completeness
 
 
 @pytest.mark.asyncio
+async def test_partial_rows_with_zero_cost_not_retried(
+    mock_client, disable_completeness_relax
+):
+    """If TikTok returns 12 hourly rows but every row has cost=0, that's an
+    INACTIVE advertiser — not a partial response. Must NOT retry. Regression
+    test for 2026-04-28 false positive (Hi-NAD+ Ads ...192017 had $0 spend
+    on 4/27 but endpoint returned 12 rows of zeros, kept raising forever)."""
+    _tz_cache["123"] = ZoneInfo("UTC")
+    # 12 rows with cost=0 — would've been < threshold 22 under old logic
+    mock_client._make_request.side_effect = [
+        _hourly_response(
+            [
+                _make_hourly_row(f"2026-03-10 {h:02d}:00:00", 0.0, 0.0, 0)
+                for h in range(12)
+            ]
+        ),
+    ]
+
+    with patch("tiktok_ads_mcp.tools.gmvmax_report_aligned.datetime") as mock_dt:
+        mock_dt.now.return_value = datetime(2026, 3, 11, 12, 0, tzinfo=timezone.utc)
+        mock_dt.strptime = datetime.strptime
+        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+
+        result = await get_gmvmax_report_aligned(
+            mock_client, "123", "2026-03-10", ["store1"], shop_tz="UTC"
+        )
+
+    assert result["metrics"]["cost"] == 0.0
+    assert result["hours_included"] == 12
+    assert mock_client._make_request.call_count == 1  # NO retry — passed through
+
+
+@pytest.mark.asyncio
 async def test_zero_rows_treated_as_inactive(mock_client, disable_completeness_relax):
     """Empty list (advertiser had no spend that day) must not trigger retry —
     it's a legitimate state, not a partial response."""
