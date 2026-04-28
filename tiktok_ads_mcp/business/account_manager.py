@@ -352,13 +352,21 @@ class AdAccountManager:
     # ── Cache helpers (sync — called from ThreadPoolExecutor) ────────
 
     def find_last_active_date(
-        self, advertiser_id: str, ad_type: str, shop_tz: str = ""
+        self,
+        advertiser_id: str,
+        ad_type: str,
+        store_ids: Optional[List[str]] = None,
+        shop_tz: str = "",
     ) -> str:
         """Find the last date with non-zero cost in ad_cost_cache.
 
         Scans from today backwards up to 45 days.
         Uses shop timezone for date calculation.
         Returns date string like '2026-03-16', or '' if nothing found.
+
+        For GMVMAX, `store_ids` MUST list every store this advertiser operates
+        across; "active that day" = ANY store had cost > 0. For Ads, pass `[""]`
+        (default) — Ads keys carry no store dimension.
         """
         from zoneinfo import ZoneInfo
 
@@ -368,12 +376,16 @@ class AdAccountManager:
         else:
             today = datetime.now(timezone.utc).date()
         ad_type_lower = ad_type.lower()
+        keys_for_iter = list(store_ids) if store_ids else [""]
         for i in range(45):
             d = today - timedelta(days=i)
             date_str = d.strftime("%Y-%m-%d")
-            entry = self.ad_cost_cache.get_daily(advertiser_id, date_str, ad_type_lower)
-            if entry and entry["cost"] > 0:
-                return date_str
+            for store_id in keys_for_iter:
+                entry = self.ad_cost_cache.get_daily(
+                    advertiser_id, date_str, ad_type_lower, store_id=store_id
+                )
+                if entry and entry["cost"] > 0:
+                    return date_str
         return ""
 
     def backfill_zero_days(
@@ -381,6 +393,7 @@ class AdAccountManager:
         advertiser_id: str,
         ad_type: str,
         last_active_date: str,
+        store_ids: Optional[List[str]] = None,
         shop_tz: str = "",
         detected_at: str = "",
         force_overwrite: bool = False,
@@ -389,6 +402,12 @@ class AdAccountManager:
 
         Ensures get_range() has complete coverage for banned accounts.
         Today is excluded — it will be filled on the next run if still banned.
+
+        For GMVMAX, `store_ids` MUST contain every store this advertiser operates
+        across (one cache key per store) — caller is responsible for collecting
+        the full set, since one advertiser_id may span multiple PRODUCT_GROUPS
+        rows. For Ads, pass `[""]` (or omit; the default `[""]` matches Ads' no-
+        store-dimension key).
 
         If last_active_date is empty but detected_at is provided, uses
         detected_at - 1 day as the start point (ensures post-ban days are zeroed).
@@ -415,23 +434,38 @@ class AdAccountManager:
         else:
             today = datetime.now(timezone.utc).date()
         ad_type_lower = ad_type.lower()
+        keys_for_iter = list(store_ids) if store_ids else [""]
 
         filled = 0
         current = last_active + timedelta(days=1)
         while current < today:
             date_str = current.strftime("%Y-%m-%d")
-            existing = self.ad_cost_cache.get_daily(
-                advertiser_id, date_str, ad_type_lower
-            )
-            if existing is None or (force_overwrite and existing.get("cost", 0) > 0):
-                self.ad_cost_cache.put_daily(
-                    advertiser_id, date_str, ad_type_lower, 0.0, 0.0, 0
+            for store_id in keys_for_iter:
+                existing = self.ad_cost_cache.get_daily(
+                    advertiser_id, date_str, ad_type_lower, store_id=store_id
                 )
-                filled += 1
+                if existing is None or (
+                    force_overwrite and existing.get("cost", 0) > 0
+                ):
+                    self.ad_cost_cache.put_daily(
+                        advertiser_id,
+                        date_str,
+                        ad_type_lower,
+                        0.0,
+                        0.0,
+                        0,
+                        store_id=store_id,
+                    )
+                    filled += 1
             current += timedelta(days=1)
 
         if filled > 0:
-            print(f"    Backfilled {filled} zero-cost days after {start_date}")
+            store_note = (
+                f" × {len(keys_for_iter)} store(s)" if len(keys_for_iter) > 1 else ""
+            )
+            print(
+                f"    Backfilled {filled} zero-cost days{store_note} after {start_date}"
+            )
 
     # ── Rescue cache (async — tries to save data before API access revoked) ──
 
@@ -456,7 +490,7 @@ class AdAccountManager:
             b = boundaries[period]
             date_str = b["date_str"]
             existing = self.ad_cost_cache.get_daily(
-                advertiser_id, date_str, ad_type.lower()
+                advertiser_id, date_str, ad_type.lower(), store_id=store_id
             )
             if existing is not None:
                 continue
@@ -471,6 +505,7 @@ class AdAccountManager:
                     m["cost"],
                     m["gmv"],
                     m["orders"],
+                    store_id=store_id,
                 )
                 print(
                     f"    Rescued {period} cache for ...{advertiser_id[-6:]}: ${m['cost']:,.2f}"
@@ -502,6 +537,8 @@ class AdAccountManager:
         roi_key = "roi" if ad_type.lower() == "gmvmax" else "roas"
         zero = {"cost": 0.0, "gmv": 0.0, "orders": 0, roi_key: 0.0}
 
+        store_id_for_cache = store_ids[0] if store_ids else ""
+
         # Banned + non-today: cache-first (avoid unnecessary API calls)
         if banned and period != "today":
             # Validate: don't return stale cache from before ban detection
@@ -516,7 +553,7 @@ class AdAccountManager:
             ban_status = ban_info.get("status", "") if ban_info else ""
 
             cached = self.ad_cost_cache.get_daily(
-                advertiser_id, date_str, ad_type.lower()
+                advertiser_id, date_str, ad_type.lower(), store_id=store_id_for_cache
             )
             if cached and cached["cost"] > 0:
                 # For NO_ACCESS accounts, reject cache for dates after ban
@@ -572,6 +609,7 @@ class AdAccountManager:
                 m["cost"],
                 m["gmv"],
                 m["orders"],
+                store_id=store_id_for_cache,
             )
             if banned and m["cost"] > 0:
                 logger.info(
@@ -581,7 +619,7 @@ class AdAccountManager:
             return m
         except TikTokPermissionError:
             cached = self.ad_cost_cache.get_daily(
-                advertiser_id, date_str, ad_type.lower()
+                advertiser_id, date_str, ad_type.lower(), store_id=store_id_for_cache
             )
             if cached and cached["cost"] > 0:
                 logger.info(
@@ -608,11 +646,17 @@ class AdAccountManager:
         """
         roi_key = "roi" if ad_type.lower() == "gmvmax" else "roas"
         zero = {"cost": 0.0, "gmv": 0.0, "orders": 0, roi_key: 0.0}
+        store_id_for_cache = store_ids[0] if store_ids else ""
 
         # Banned accounts: cache-only for ranges (too many API calls otherwise)
         if banned:
             cached = self.ad_cost_cache.get_range(
-                advertiser_id, start, end, ad_type.lower(), allow_partial=True
+                advertiser_id,
+                start,
+                end,
+                ad_type.lower(),
+                allow_partial=True,
+                store_id=store_id_for_cache,
             )
             if cached:
                 days_info = ""
@@ -631,14 +675,19 @@ class AdAccountManager:
             m = await self._fetch_range_report(
                 advertiser_id,
                 ad_type,
-                store_ids[0] if store_ids else "",
+                store_id_for_cache,
                 start,
                 end,
             )
             return m
         except TikTokPermissionError:
             cached = self.ad_cost_cache.get_range(
-                advertiser_id, start, end, ad_type.lower(), allow_partial=True
+                advertiser_id,
+                start,
+                end,
+                ad_type.lower(),
+                allow_partial=True,
+                store_id=store_id_for_cache,
             )
             if cached:
                 logger.info(

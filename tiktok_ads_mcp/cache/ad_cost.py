@@ -6,7 +6,18 @@ By caching each account's daily cost from yesterday/today fetches,
 MTD can sum cached daily costs instead of relying on date-range queries
 that fail for banned accounts.
 
-Cache key: {advertiser_id}:{date_str}:{type}  (type = gmvmax or ads)
+Cache key:
+  - GMVMAX: {advertiser_id}:{date_str}:gmvmax:{store_id}
+  - Ads:    {advertiser_id}:{date_str}:ads
+
+GMVMAX keys MUST include store_id — TikTok's GMVMAX report API filters by
+store, and one advertiser can be configured across multiple stores (different
+PRODUCT_GROUPS rows for the same advertiser_id). Cross-store aggregation in
+the cache (the previous bug, key omitting store_id) caused MTD to overcount
+when banned-route cache lookups fanned the same value across N groups.
+Callers must pass store_id for GMVMAX or ValueError is raised — silent
+fallback to a store-less key would re-introduce the same drift.
+
 Cache value: {cost, gmv, orders, cached_at}
 """
 
@@ -16,6 +27,21 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Optional
+
+
+def _build_key(advertiser_id: str, date_str: str, ad_type: str, store_id: str) -> str:
+    """Build cache key. Enforces store_id for GMVMAX (Bug B contract)."""
+    ad_type_lower = ad_type.lower()
+    if ad_type_lower == "gmvmax":
+        if not store_id:
+            raise ValueError(
+                f"GMVMAX cache access requires store_id (advertiser={advertiser_id}, "
+                f"date={date_str}). Single-store fallback would risk cross-store "
+                f"aggregation; pass the store_id explicitly."
+            )
+        return f"{advertiser_id}:{date_str}:gmvmax:{store_id}"
+    # Ads: TikTok API doesn't expose store dimension; key stays store-less.
+    return f"{advertiser_id}:{date_str}:{ad_type_lower}"
 
 
 class AdCostCache:
@@ -70,15 +96,17 @@ class AdCostCache:
         cost: float,
         gmv: float,
         orders: int,
+        store_id: str = "",
     ):
         """Cache one account's cost for a specific date.
 
         Called after successfully fetching today/yesterday data.
         ad_type: 'gmvmax' or 'ads'
+        store_id: REQUIRED for gmvmax (raises ValueError if empty); Ads ignores it.
         """
         with self._lock:
             cache = self._load()
-            key = f"{advertiser_id}:{date_str}:{ad_type}"
+            key = _build_key(advertiser_id, date_str, ad_type, store_id)
             cache[key] = {
                 "cost": cost,
                 "gmv": gmv,
@@ -94,12 +122,19 @@ class AdCostCache:
             self._save()
 
     def get_daily(
-        self, advertiser_id: str, date_str: str, ad_type: str
+        self,
+        advertiser_id: str,
+        date_str: str,
+        ad_type: str,
+        store_id: str = "",
     ) -> Optional[Dict]:
-        """Return cached {cost, gmv, orders} for one account on one date."""
+        """Return cached {cost, gmv, orders} for one account on one date.
+
+        store_id REQUIRED for gmvmax (raises ValueError if empty); Ads ignores it.
+        """
         with self._lock:
             cache = self._load()
-            key = f"{advertiser_id}:{date_str}:{ad_type}"
+            key = _build_key(advertiser_id, date_str, ad_type, store_id)
             entry = cache.get(key)
             if entry:
                 return {
@@ -116,6 +151,7 @@ class AdCostCache:
         end_date: str,
         ad_type: str,
         allow_partial: bool = False,
+        store_id: str = "",
     ) -> Optional[Dict]:
         """Sum cached daily costs for a date range.
 
@@ -124,6 +160,8 @@ class AdCostCache:
 
         With allow_partial=True, returns whatever is cached (for banned accounts
         where API is inaccessible). Result includes 'cached_days' and 'total_days'.
+
+        store_id REQUIRED for gmvmax (raises ValueError if empty); Ads ignores it.
         """
         start = datetime.strptime(start_date, "%Y-%m-%d")
         end = datetime.strptime(end_date, "%Y-%m-%d")
@@ -140,7 +178,7 @@ class AdCostCache:
             while current <= end:
                 total_days += 1
                 date_str = current.strftime("%Y-%m-%d")
-                key = f"{advertiser_id}:{date_str}:{ad_type}"
+                key = _build_key(advertiser_id, date_str, ad_type, store_id)
                 entry = cache.get(key)
                 if entry is None:
                     if not allow_partial:
