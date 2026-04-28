@@ -371,6 +371,126 @@ async def test_fetch_ad_cost_range_permission_fallback(manager, caches):
         assert result["cached_days"] == 2
 
 
+# ── L1: cache-API equivalence for multi-store advertisers ──
+#
+# Bug B regression guard: when one advertiser_id is wired to multiple stores,
+# the API path (banned=False) and cache path (banned=True) must return the
+# SAME store-specific value for a given store_ids=[X]. Pre-fix the cache key
+# omitted store_id, so banned-route lookups returned a cross-store aggregate
+# while API-route used the per-store API filter — the two diverged silently.
+# These tests would have failed against the pre-fix code, gating the 86e61c1
+# class of "I assume cache and API are data-equivalent" mistakes at PR time.
+
+
+@pytest.mark.asyncio
+async def test_multi_store_advertiser_api_and_cache_paths_agree_per_store(
+    manager, caches
+):
+    """For a multi-store advertiser, banned=False (API) and banned=True (cache)
+    must return identical per-store values when called with the same store_ids."""
+    # Same advertiser, two stores, very different per-store spend
+    cache = caches["ad_cost"]
+    api_response = {
+        "store_FN": {"cost": 4221.77, "gmv": 8004.01, "orders": 130, "roi": 1.9},
+        "store_Hii": {"cost": 5000.00, "gmv": 10000.00, "orders": 200, "roi": 2.0},
+    }
+    # Pre-populate cache per-store to mirror API
+    for store_id, m in api_response.items():
+        cache.put_daily(
+            "shared_adv",
+            "2026-04-15",
+            "gmvmax",
+            m["cost"],
+            m["gmv"],
+            m["orders"],
+            store_id=store_id,
+        )
+
+    async def fake_fetch_single_report(adv, ad_type, store_id, date_str, shop_tz):
+        return dict(api_response[store_id])
+
+    # API path: not banned, fetch from "API"
+    with patch.object(
+        manager, "_fetch_single_report", side_effect=fake_fetch_single_report
+    ):
+        api_fn = await manager.fetch_ad_cost(
+            "shared_adv",
+            "2026-04-15",
+            "gmvmax",
+            store_ids=["store_FN"],
+            period="yesterday",
+            banned=False,
+        )
+
+    # Cache path: banned, must NOT return cross-store aggregate
+    cache_fn = await manager.fetch_ad_cost(
+        "shared_adv",
+        "2026-04-15",
+        "gmvmax",
+        store_ids=["store_FN"],
+        period="yesterday",
+        banned=True,
+    )
+
+    # Both paths return store_FN's value, neither returns store_Hii or sum
+    assert api_fn["cost"] == 4221.77
+    assert cache_fn["cost"] == 4221.77
+    # Critically: the cache path MUST NOT return $9,221.77 (cross-store sum)
+    # — that's exactly what 86e61c1 silently did.
+    assert cache_fn["cost"] != 9221.77
+
+
+@pytest.mark.asyncio
+async def test_multi_store_range_api_and_cache_paths_agree_per_store(manager, caches):
+    """Same equivalence test on the range path (where Bug B caused $73k overcount)."""
+    cache = caches["ad_cost"]
+    # 3 days × 2 stores
+    for date in ("2026-04-13", "2026-04-14", "2026-04-15"):
+        cache.put_daily(
+            "shared_adv", date, "gmvmax", 1000.0, 2000.0, 30, store_id="store_FN"
+        )
+        cache.put_daily(
+            "shared_adv", date, "gmvmax", 2500.0, 5000.0, 80, store_id="store_Hii"
+        )
+
+    async def fake_fetch_range_report(adv, ad_type, store_id, start, end):
+        # API filters by store; return store-specific 3-day total
+        per_day = {"store_FN": 1000.0, "store_Hii": 2500.0}
+        return {
+            "cost": per_day[store_id] * 3,
+            "gmv": per_day[store_id] * 6,
+            "orders": 90 if store_id == "store_FN" else 240,
+            "roi": 2.0,
+        }
+
+    with patch.object(
+        manager, "_fetch_range_report", side_effect=fake_fetch_range_report
+    ):
+        api_fn = await manager.fetch_ad_cost_range(
+            "shared_adv",
+            "2026-04-13",
+            "2026-04-15",
+            "gmvmax",
+            store_ids=["store_FN"],
+            banned=False,
+        )
+
+    cache_fn = await manager.fetch_ad_cost_range(
+        "shared_adv",
+        "2026-04-13",
+        "2026-04-15",
+        "gmvmax",
+        store_ids=["store_FN"],
+        banned=True,
+    )
+
+    assert api_fn["cost"] == 3000.0
+    assert cache_fn["cost"] == 3000.0
+    # Pre-fix this would have been $10,500 (3 × ($1k + $2.5k)) — exactly the
+    # 2026-04-28 incident shape at smaller scale.
+    assert cache_fn["cost"] != 10500.0
+
+
 # ── get_advertiser_balance ──
 
 
