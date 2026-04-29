@@ -113,10 +113,19 @@ async def get_gmvmax_report_aligned(
     # Determine which native dates to query
     dates_to_query = native_dates_for_day(date, shop_zone, ad_zone)
 
-    # Fetch hourly data for each native date
+    # Fetch hourly data for each native date concurrently. Cross-tz queries
+    # usually span 2 native dates; client's asyncio.Semaphore(5) keeps real
+    # concurrency inside the existing rate-limit budget.
+    import asyncio as _asyncio
+
+    fetched = await _asyncio.gather(
+        *(
+            _fetch_hourly(client, advertiser_id, d, store_ids, metrics)
+            for d in dates_to_query
+        )
+    )
     all_rows: List[Dict] = []
-    for d in dates_to_query:
-        rows = await _fetch_hourly(client, advertiser_id, d, store_ids, metrics)
+    for rows in fetched:
         all_rows.extend(rows)
 
     # Filter and aggregate
@@ -252,11 +261,17 @@ async def get_gmvmax_report_aligned_breakdown(
 
     dates_to_query = native_dates_for_day(date, shop_zone, ad_zone)
 
-    all_rows: List[Dict] = []
-    for d in dates_to_query:
-        rows = await _fetch_hourly_breakdown(
-            client, advertiser_id, d, store_ids, metrics
+    # Concurrent fetch — see non-breakdown variant for rate-limit reasoning.
+    import asyncio as _asyncio
+
+    fetched = await _asyncio.gather(
+        *(
+            _fetch_hourly_breakdown(client, advertiser_id, d, store_ids, metrics)
+            for d in dates_to_query
         )
+    )
+    all_rows: List[Dict] = []
+    for rows in fetched:
         all_rows.extend(rows)
 
     # Aggregate per-store

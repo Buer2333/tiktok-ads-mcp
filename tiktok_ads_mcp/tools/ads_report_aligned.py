@@ -106,9 +106,17 @@ async def get_ads_report_aligned(
 
     dates_to_query = native_dates_for_day(date, shop_zone, ad_zone)
 
+    # Fetch each native date concurrently. Cross-tz queries usually span 2
+    # native dates and were previously serial — gather halves wall time.
+    # The mcp client's internal asyncio.Semaphore(5) caps real concurrency,
+    # so this can't fan out beyond the existing rate-limit budget.
+    import asyncio as _asyncio
+
+    fetched = await _asyncio.gather(
+        *(_fetch_ads_hourly(client, advertiser_id, d, metrics) for d in dates_to_query)
+    )
     all_rows: List[Dict] = []
-    for d in dates_to_query:
-        rows = await _fetch_ads_hourly(client, advertiser_id, d, metrics)
+    for rows in fetched:
         all_rows.extend(rows)
 
     # Aggregate
