@@ -160,3 +160,54 @@ async def test_tz_cache_reused(mock_client):
 
     assert mock_client._make_request.call_count == 1
     assert result["hours_included"] == 1
+
+
+@pytest.mark.asyncio
+async def test_cross_tz_offhours_no_false_partial_alarm():
+    """Real-world 2026-04-29 case: ad_tz=Asia/Manila (UTC+8), shop=PDT.
+    Account doesn't run during ad-local pre-dawn hours, which fall inside
+    the shop-day UTC window. Latest row is recent (close to now), so the
+    new latest-row-lag check must NOT raise even though hours_included
+    (~14) is far below the old `expected` (~19) for shop-PDT today.
+    Regression test for the rate-limit false positive."""
+
+    _tz_cache["adv_manila"] = ZoneInfo("Asia/Manila")
+    client = MagicMock()
+    client._make_request = AsyncMock()
+
+    # Active hours: ad_local 2026-04-28 19:00 → 2026-04-29 10:00 (= UTC
+    # 2026-04-28 11:00 → 2026-04-29 02:00). Pre-dawn ad-local hours have
+    # no row at all (TikTok omits zero-only off-hours).
+    rows_native_28 = [
+        _make_hourly_row(f"2026-04-28 {h:02d}:00:00", 1.5, 3.0, 1)
+        for h in range(19, 24)
+    ]
+    rows_native_29 = [
+        _make_hourly_row(f"2026-04-29 {h:02d}:00:00", 1.0, 2.5, 1) for h in range(0, 11)
+    ]
+
+    client._make_request.side_effect = [
+        _hourly_response(rows_native_28),
+        _hourly_response(rows_native_29),
+    ]
+
+    # Disable the relax patch for this test by re-patching tighter tol.
+    with (
+        patch("tiktok_ads_mcp.tools.ads_report_aligned._HOURS_LAG_TOLERANCE", 2),
+        patch("tiktok_ads_mcp.tools.ads_report_aligned.datetime") as mock_dt,
+    ):
+        mock_dt.now.return_value = datetime(2026, 4, 29, 2, 30, tzinfo=timezone.utc)
+        mock_dt.strptime = datetime.strptime
+        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+
+        # Should NOT raise — latest row UTC ≈ 02:00 is within tol of now.
+        result = await get_ads_report_aligned(
+            client,
+            "adv_manila",
+            "2026-04-28",
+            shop_tz="America/Los_Angeles",
+        )
+
+    assert result["metrics"]["cost"] > 0
+    assert result["hours_included"] >= 14  # off-hours legitimately missing
+    assert client._make_request.call_count == 2  # no retries

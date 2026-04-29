@@ -243,7 +243,10 @@ async def test_partial_response_triggers_retry(mock_client, disable_completeness
                 mock_client, "123", "2026-03-10", ["store1"], shop_tz="UTC"
             )
 
-    assert "hours_included=5" in str(exc.value)
+    # Latest hour we received is 04:00 UTC; now=2026-03-11 12:00 UTC, so the
+    # most-recent-row lag is ~31h — far above tol — and triggers retry.
+    assert "lags" in str(exc.value)
+    assert "truncated mid-window" in str(exc.value)
     # Decorator retried 3 times, each consuming 1 mock response
     assert mock_client._make_request.call_count == 3
 

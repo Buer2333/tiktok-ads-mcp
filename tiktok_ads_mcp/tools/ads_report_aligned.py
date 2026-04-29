@@ -6,7 +6,7 @@ regardless of the ad account's native timezone setting.
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from mcp_retry import api_retry
@@ -116,6 +116,7 @@ async def get_ads_report_aligned(
     gmv = 0.0
     orders = 0
     hours_included = 0
+    last_row_utc: Optional[datetime] = None
 
     for row in all_rows:
         dims = row.get("dimensions", {})
@@ -131,22 +132,36 @@ async def get_ads_report_aligned(
             gmv += float(row_metrics.get("total_onsite_shopping_value", 0))
             orders += int(row_metrics.get("onsite_shopping", 0))
             hours_included += 1
+            if last_row_utc is None or utc_dt > last_row_utc:
+                last_row_utc = utc_dt
 
-    # Completeness check: see gmvmax_report_aligned for the full reasoning.
-    # Only raise when there's evidence of *some* cost AND row count is below
-    # threshold — that's the unambiguous partial-response fingerprint.
-    # Inactive advertisers (cost=0) return arbitrary row counts and must
-    # not be retried (false positive: 2026-04-28 Hi-NAD+ Ads ...192017
-    # had $0 spend on 4/27 but endpoint returned 12 rows → kept raising).
-    expected = _expected_hours(date, shop_zone, now_utc)
-    threshold = max(1, expected - _HOURS_LAG_TOLERANCE)
-    if expected > 0 and cost > 0 and 0 < hours_included < threshold:
-        raise TikTokIncompleteDataError(
-            f"Ads advertiser={advertiser_id} date={date}: "
-            f"hours_included={hours_included} < threshold={threshold} "
-            f"(expected={expected}, tol={_HOURS_LAG_TOLERANCE}, cost=${cost:.2f}) — "
-            f"likely token rate-limit partial response"
+    # Completeness check: detect rate-limit truncation via *most-recent-row lag*,
+    # not raw row count. Counting hours misclassifies cross-timezone accounts
+    # that don't run 24/7 — TikTok's hourly endpoint omits rows for off-hours
+    # by design, so an account whose ad_tz is UTC+8 with a shop in PDT will
+    # always report fewer rows than `_expected_hours` predicts (the account-
+    # local pre-dawn hours fall inside the shop window but never ran), even
+    # under perfect API conditions. The unambiguous truncation fingerprint is
+    # *latest hour seen* lagging now by more than tol — the endpoint stopped
+    # updating mid-window.
+    if cost > 0 and last_row_utc is not None:
+        # The latest hour we *should* have seen is min(now-1h, last hour of
+        # the shop-day). For past full days the cap is the day's 23:00 UTC;
+        # for today it's now-1h.
+        last_full_hour = (now_utc - timedelta(hours=1)).replace(
+            minute=0, second=0, microsecond=0
         )
+        expected_last = min(last_full_hour, end_utc - timedelta(hours=1))
+        lag_h = (expected_last - last_row_utc).total_seconds() / 3600
+        if lag_h > _HOURS_LAG_TOLERANCE:
+            raise TikTokIncompleteDataError(
+                f"Ads advertiser={advertiser_id} date={date}: "
+                f"latest_row={last_row_utc.strftime('%Y-%m-%d %H:%M UTC')} "
+                f"lags {lag_h:.1f}h behind expected="
+                f"{expected_last.strftime('%Y-%m-%d %H:%M UTC')} "
+                f"(tol={_HOURS_LAG_TOLERANCE}, cost=${cost:.2f}) — "
+                f"likely token rate-limit truncated mid-window"
+            )
 
     roas = round(gmv / cost, 2) if cost > 0 else 0.0
 

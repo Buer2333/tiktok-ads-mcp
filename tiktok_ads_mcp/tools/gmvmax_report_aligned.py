@@ -6,7 +6,7 @@ regardless of the ad account's native timezone setting.
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from mcp_retry import api_retry
@@ -122,6 +122,7 @@ async def get_gmvmax_report_aligned(
     # Filter and aggregate
     aggregated: Dict[str, float] = {m: 0.0 for m in metrics}
     hours_included = 0
+    last_row_utc: Optional[datetime] = None
 
     for row in all_rows:
         dims = row.get("dimensions", {})
@@ -141,40 +142,34 @@ async def get_gmvmax_report_aligned(
                 except (ValueError, TypeError):
                     pass
             hours_included += 1
+            if last_row_utc is None or utc_dt > last_row_utc:
+                last_row_utc = utc_dt
 
-    # Completeness check: token-level rate-limit on TikTok occasionally
-    # degrades to code=0 + partial-hours list (silent partial response).
-    # Without this guard, partial data overwrites cache and the next push
-    # shows today cost LOWER than an earlier same-day push (2026-04-28
-    # incident: 11:01 cost $10,470 → 14:01 cost $8,789 for FN-Shilajit).
-    # Calculate aggregated cost first — completeness check below uses it.
     cost = aggregated.get("cost", 0.0)
     gmv = aggregated.get("gross_revenue", 0.0)
     roi = round(gmv / cost, 2) if cost > 0 else 0.0
 
-    # Completeness check: token-level rate-limit on TikTok occasionally
-    # degrades to code=0 + partial-hours list (silent partial response).
-    # Without this guard, partial data overwrites cache and the next push
-    # shows today cost LOWER than an earlier same-day push (2026-04-28
-    # incident: 11:01 cost $10,470 → 14:01 cost $8,789 for FN-Shilajit).
-    #
-    # Two false-positive cases we MUST allow through:
-    #   - hours_included == 0: advertiser had no spend that day (inactive)
-    #   - cost == 0:           same — advertiser exists but didn't spend.
-    #                          TikTok returns variable row count for $0 days
-    #                          (sometimes 12, sometimes 24) and we cannot
-    #                          distinguish that from a partial-cost response.
-    # Only raise when we have *some* cost AND row count is below threshold —
-    # that's the unambiguous fingerprint of a truncated successful response.
-    expected = _expected_hours(date, shop_zone, now_utc)
-    threshold = max(1, expected - _HOURS_LAG_TOLERANCE)
-    if expected > 0 and cost > 0 and 0 < hours_included < threshold:
-        raise TikTokIncompleteDataError(
-            f"GMVMAX advertiser={advertiser_id} date={date} stores={store_ids}: "
-            f"hours_included={hours_included} < threshold={threshold} "
-            f"(expected={expected}, tol={_HOURS_LAG_TOLERANCE}, cost=${cost:.2f}) — "
-            f"likely token rate-limit partial response"
+    # Completeness check: rate-limit truncation manifests as the hourly
+    # endpoint stopping mid-window — i.e. the latest hour we can read lags
+    # noticeably behind now. Earlier counting-rows logic conflated that with
+    # cross-timezone accounts whose ad-local off-hours fall inside the shop
+    # window (those hours have no row by design and should not retry). See
+    # ads_report_aligned for the fuller incident write-up.
+    if cost > 0 and last_row_utc is not None:
+        last_full_hour = (now_utc - timedelta(hours=1)).replace(
+            minute=0, second=0, microsecond=0
         )
+        expected_last = min(last_full_hour, end_utc - timedelta(hours=1))
+        lag_h = (expected_last - last_row_utc).total_seconds() / 3600
+        if lag_h > _HOURS_LAG_TOLERANCE:
+            raise TikTokIncompleteDataError(
+                f"GMVMAX advertiser={advertiser_id} date={date} stores={store_ids}: "
+                f"latest_row={last_row_utc.strftime('%Y-%m-%d %H:%M UTC')} "
+                f"lags {lag_h:.1f}h behind expected="
+                f"{expected_last.strftime('%Y-%m-%d %H:%M UTC')} "
+                f"(tol={_HOURS_LAG_TOLERANCE}, cost=${cost:.2f}) — "
+                f"likely token rate-limit truncated mid-window"
+            )
 
     # Round monetary values
     for m in aggregated:
@@ -267,6 +262,7 @@ async def get_gmvmax_report_aligned_breakdown(
     # Aggregate per-store
     by_store: Dict[str, Dict[str, float]] = {}
     hours_seen: Dict[str, int] = {}
+    last_row_per_store: Dict[str, datetime] = {}
 
     for row in all_rows:
         dims = row.get("dimensions", {})
@@ -287,23 +283,31 @@ async def get_gmvmax_report_aligned_breakdown(
             except (ValueError, TypeError):
                 pass
         hours_seen[store_id] = hours_seen.get(store_id, 0) + 1
+        prev = last_row_per_store.get(store_id)
+        if prev is None or utc_dt > prev:
+            last_row_per_store[store_id] = utc_dt
 
-    # Completeness check (per-store): same false-positive guard as the
-    # non-breakdown variant — only flag a store if it had cost > 0 yet
-    # returned fewer rows than expected. Pure-zero stores (inactive on
-    # this day) sometimes return arbitrary row counts and must not retry.
-    expected = _expected_hours(date, shop_zone, now_utc)
-    threshold = max(1, expected - _HOURS_LAG_TOLERANCE)
-    if expected > 0:
-        for store_id, bucket in by_store.items():
-            store_cost = bucket.get("cost", 0.0)
-            store_hours = hours_seen.get(store_id, 0)
-            if store_cost > 0 and 0 < store_hours < threshold:
+    # Completeness check (per-store): use latest-row lag (see non-breakdown
+    # variant). Counting rows breaks for cross-tz accounts whose ad-local
+    # off-hours fall inside the shop window.
+    last_full_hour = (now_utc - timedelta(hours=1)).replace(
+        minute=0, second=0, microsecond=0
+    )
+    expected_last = min(last_full_hour, end_utc - timedelta(hours=1))
+    for store_id, bucket in by_store.items():
+        store_cost = bucket.get("cost", 0.0)
+        store_last = last_row_per_store.get(store_id)
+        if store_cost > 0 and store_last is not None:
+            lag_h = (expected_last - store_last).total_seconds() / 3600
+            if lag_h > _HOURS_LAG_TOLERANCE:
                 raise TikTokIncompleteDataError(
                     f"GMVMAX-breakdown advertiser={advertiser_id} date={date}: "
-                    f"store={store_id} hours={store_hours} < threshold={threshold} "
-                    f"(expected={expected}, cost=${store_cost:.2f}) — "
-                    f"likely token rate-limit partial response"
+                    f"store={store_id} latest_row="
+                    f"{store_last.strftime('%Y-%m-%d %H:%M UTC')} "
+                    f"lags {lag_h:.1f}h behind expected="
+                    f"{expected_last.strftime('%Y-%m-%d %H:%M UTC')} "
+                    f"(tol={_HOURS_LAG_TOLERANCE}, cost=${store_cost:.2f}) — "
+                    f"likely token rate-limit truncated mid-window"
                 )
 
     breakdown: Dict[str, Dict[str, Any]] = {}
