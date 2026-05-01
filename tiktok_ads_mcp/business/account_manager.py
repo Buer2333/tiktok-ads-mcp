@@ -12,7 +12,11 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Dict, List, Optional, Set
 
-from ..client import TikTokAdsClient, TikTokPermissionError
+from ..client import (
+    TikTokAdsClient,
+    TikTokIncompleteDataError,
+    TikTokPermissionError,
+)
 from ..cache import (
     AdCostCache,
     BanStatusCache,
@@ -696,6 +700,26 @@ class AdAccountManager:
                 )
                 return cached
             return zero
+        except TikTokIncompleteDataError:
+            # Transient API lag (rate-limit truncated mid-window). Cache typically
+            # holds the prior successful fetch — prefer that over hard-failing,
+            # since a slightly stale value beats dropping the entire account.
+            # If cache is also empty, propagate so caller can mark the error.
+            cached = self.ad_cost_cache.get_range(
+                advertiser_id,
+                start,
+                end,
+                ad_type.lower(),
+                allow_partial=True,
+                store_id=store_id_for_cache,
+            )
+            if cached:
+                logger.warning(
+                    f"{ad_type} ...{advertiser_id[-6:]}: incomplete API data, "
+                    f"using cache ${cached['cost']:.2f}"
+                )
+                return cached
+            raise
 
     # ── Per-store breakdown (decoupled from bitable per-row binding) ──
 

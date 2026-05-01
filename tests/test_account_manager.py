@@ -3,7 +3,10 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from tiktok_ads_mcp.client import TikTokPermissionError
+from tiktok_ads_mcp.client import (
+    TikTokIncompleteDataError,
+    TikTokPermissionError,
+)
 from tiktok_ads_mcp.cache import AdCostCache, BanStatusCache, BalanceSnapshotCache
 from tiktok_ads_mcp.business import AdAccountManager
 
@@ -369,6 +372,38 @@ async def test_fetch_ad_cost_range_permission_fallback(manager, caches):
         )
         assert result["cost"] == 30.0
         assert result["cached_days"] == 2
+
+
+@pytest.mark.asyncio
+async def test_fetch_ad_cost_range_incomplete_data_fallback_to_cache(manager, caches):
+    """Transient IncompleteDataError → use cache instead of hard-failing."""
+    caches["ad_cost"].put_daily(
+        "222", "2026-04-30", "ads", 24.93, 33.98, 1, store_id=""
+    )
+    with patch.object(
+        manager,
+        "_fetch_range_report",
+        new_callable=AsyncMock,
+        side_effect=TikTokIncompleteDataError("lag 3.0h"),
+    ):
+        result = await manager.fetch_ad_cost_range(
+            "222", "2026-04-30", "2026-04-30", "ads"
+        )
+        assert result["cost"] == 24.93
+        assert result["orders"] == 1
+
+
+@pytest.mark.asyncio
+async def test_fetch_ad_cost_range_incomplete_data_no_cache_propagates(manager, caches):
+    """IncompleteDataError + empty cache → propagate so caller marks the error."""
+    with patch.object(
+        manager,
+        "_fetch_range_report",
+        new_callable=AsyncMock,
+        side_effect=TikTokIncompleteDataError("lag 3.0h"),
+    ):
+        with pytest.raises(TikTokIncompleteDataError):
+            await manager.fetch_ad_cost_range("999", "2026-04-30", "2026-04-30", "ads")
 
 
 # ── L1: cache-API equivalence for multi-store advertisers ──
