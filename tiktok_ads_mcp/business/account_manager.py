@@ -229,7 +229,16 @@ class AdAccountManager:
 
         discovered = []
         checked = 0
-        batch = list(unknown_ids)[: self._PHASE2_BATCH_LIMIT]
+
+        # Pick the staleest first (least-recently-checked or never-checked).
+        # Without this, set→list iteration order is hash-based, so the same 20
+        # accounts could get re-checked every run while others starve.
+        # ISO date strings sort lexicographically; missing entry → "" wins (= highest priority).
+        def _last_seen(adv_id: str) -> str:
+            entry = self.discovery_cache.get(adv_id)
+            return entry.get("last_seen", "") if entry else ""
+
+        batch = sorted(unknown_ids, key=_last_seen)[: self._PHASE2_BATCH_LIMIT]
 
         if len(unknown_ids) > self._PHASE2_BATCH_LIMIT:
             logger.info(
