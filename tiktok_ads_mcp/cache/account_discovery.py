@@ -137,32 +137,6 @@ class AccountDiscoveryCache:
                 and entry.get("last_seen", "") < cutoff
             }
 
-    def get_stale_incomplete_gmvmax(self, max_days: int = 7) -> Set[str]:
-        """Return 'gmvmax' accounts that have campaigns but no store_id resolved.
-
-        These are typically a byproduct of `client._make_request` returning
-        200 OK with missing `store_id` under partial-auth scope: token[0]
-        sees the advertiser but campaign_info omits store_id; token[1] has
-        full visibility. Without revalidation, these stay `store_ids=[]`
-        forever and ads-report misses them. Shorter max_days (7d) than
-        unknown stale (14d) because this is a known bug pattern from
-        shared-asset advertisers, worth re-checking more aggressively to
-        give token rotation another shot.
-        """
-        from datetime import timedelta
-
-        cutoff = (date.today() - timedelta(days=max_days)).isoformat()
-        with self._lock:
-            cache = self._load()
-            return {
-                adv_id
-                for adv_id, entry in cache.items()
-                if entry.get("ad_type") == "gmvmax"
-                and not entry.get("store_ids")
-                and not entry.get("banned")
-                and entry.get("last_seen", "") < cutoff
-            }
-
     def mark_seen(self, advertiser_id: str):
         """Update last_seen timestamp for an account."""
         today = date.today().isoformat()
