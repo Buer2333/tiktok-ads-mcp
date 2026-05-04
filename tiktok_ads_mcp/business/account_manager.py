@@ -198,6 +198,19 @@ class AdAccountManager:
             )
             unknown_ids |= stale_authorized
 
+        # Re-validate "gmvmax + store_ids=[]" entries (>7d): shared-asset
+        # advertisers whose first campaign_info call returned 200 without a
+        # store_id field (partial-auth scope on token[0]). Re-checking gives
+        # the dual-token client another chance to land on token[1].
+        stale_incomplete = self.discovery_cache.get_stale_incomplete_gmvmax(max_days=7)
+        stale_inc_authorized = stale_incomplete & all_authorized_ids
+        if stale_inc_authorized:
+            logger.info(
+                f"discover: {len(stale_inc_authorized)} gmvmax-incomplete "
+                f"(no store_id) due for re-validation (>7d)"
+            )
+            unknown_ids |= stale_inc_authorized
+
         if unknown_ids:
             phase2 = await self._discover_via_campaigns(unknown_ids, known_store_ids)
             discovered.extend(phase2)
