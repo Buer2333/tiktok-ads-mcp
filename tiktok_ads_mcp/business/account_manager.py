@@ -40,6 +40,7 @@ class AdAccountManager:
         balance_cache: Optional[BalanceSnapshotCache] = None,
         client_factory=None,
         discovery_cache: Optional["AccountDiscoveryCache"] = None,
+        editor_data_cache: Optional[EditorDataCache] = None,
     ):
         self._client = client
         self._client_factory = client_factory
@@ -47,6 +48,7 @@ class AdAccountManager:
         self.ban_status_cache = ban_status_cache
         self.balance_cache = balance_cache
         self.discovery_cache = discovery_cache
+        self.editor_data_cache = editor_data_cache
 
     @property
     def client(self) -> TikTokAdsClient:
