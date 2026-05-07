@@ -653,10 +653,19 @@ class AdAccountManager:
         ad_type: str,
         store_ids: Optional[List[str]] = None,
         banned: bool = False,
+        aligned: bool = False,
+        shop_tz: str = "America/Los_Angeles",
     ) -> Dict:
         """Fetch date-range ad cost with ban-awareness and cache fallback.
 
         Ban-aware: banned accounts use cache directly (avoid API calls for ranges).
+
+        When `aligned=True`, the underlying range fetch uses the per-day shop-tz
+        aligned aggregator (`get_*_range_report_aligned`) which sums hourly
+        single-day fetches. This produces shop-day-correct totals matching
+        AdCostCache writes (which also go through the aligned single-day path).
+        Default `aligned=False` preserves the legacy ad_tz native range API.
+
         Returns dict with keys: cost, gmv, orders.
         """
         roi_key = "roi" if ad_type.lower() == "gmvmax" else "roas"
@@ -693,6 +702,8 @@ class AdAccountManager:
                 store_id_for_cache,
                 start,
                 end,
+                aligned=aligned,
+                shop_tz=shop_tz,
             )
             return m
         except TikTokPermissionError:
@@ -920,14 +931,32 @@ class AdAccountManager:
         store_id: str,
         start_date: str,
         end_date: str,
+        aligned: bool = False,
+        shop_tz: str = "America/Los_Angeles",
     ) -> Dict:
-        """Dispatch to the appropriate range report tool."""
+        """Dispatch to the appropriate range report tool.
+
+        aligned=True: uses shop-tz per-day aligned aggregator (matches
+        AdCostCache write path, more API calls but business-canonical).
+        aligned=False (default): legacy ad_tz native single-call range API.
+        """
         from ..tools.range_reports import (
             get_ads_range_report,
+            get_ads_range_report_aligned,
             get_gmvmax_range_report,
+            get_gmvmax_range_report_aligned,
         )
 
         if ad_type.lower() == "gmvmax" and store_id:
+            if aligned:
+                return await get_gmvmax_range_report_aligned(
+                    self.client,
+                    advertiser_id,
+                    [store_id],
+                    start_date,
+                    end_date,
+                    shop_tz=shop_tz,
+                )
             return await get_gmvmax_range_report(
                 self.client,
                 advertiser_id,
@@ -936,6 +965,14 @@ class AdAccountManager:
                 end_date,
             )
         else:
+            if aligned:
+                return await get_ads_range_report_aligned(
+                    self.client,
+                    advertiser_id,
+                    start_date,
+                    end_date,
+                    shop_tz=shop_tz,
+                )
             return await get_ads_range_report(
                 self.client,
                 advertiser_id,

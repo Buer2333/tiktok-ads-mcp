@@ -1,11 +1,20 @@
 """Date-range aggregate reports (GMVMAX and Ads).
 
-Simple date-range aggregation without timezone alignment.
-Used for MTD summaries where per-hour cutting is not needed.
+Two flavors:
+  - `get_*_range_report` — single API call, server-side aggregation in
+    advertiser native timezone (ad_tz). Faster but ad_tz-bound.
+  - `get_*_range_report_aligned` — per-day loop calling the shop-tz
+    aligned single-day fetcher, then sum. Matches the AdCostCache write
+    path (which stores shop_tz-aligned single-day values), so cache-first
+    reads can return identical numbers to a fresh API call.
+
+Use the aligned variants when consumers expect shop-day semantics
+(daily/MTD reports for operations who view shop-tz dashboards).
 """
 
 import json
 import logging
+from datetime import datetime, timedelta
 from typing import Any, Dict, List
 
 from mcp_retry import api_retry
@@ -13,6 +22,18 @@ from mcp_retry import api_retry
 from ..client import TikTokAdsClient, TikTokRateLimitError
 
 logger = logging.getLogger(__name__)
+
+
+def _date_iter(start_date: str, end_date: str) -> List[str]:
+    """Inclusive YYYY-MM-DD date list for [start, end]."""
+    s = datetime.strptime(start_date, "%Y-%m-%d")
+    e = datetime.strptime(end_date, "%Y-%m-%d")
+    out = []
+    cur = s
+    while cur <= e:
+        out.append(cur.strftime("%Y-%m-%d"))
+        cur += timedelta(days=1)
+    return out
 
 
 @api_retry(
@@ -203,3 +224,98 @@ async def get_ads_range_report(
     total["cost"] = round(total["cost"], 2)
     total["gmv"] = round(total["gmv"], 2)
     return total
+
+
+# ── Shop-tz aligned variants ──────────────────────────────────────────
+
+
+async def get_gmvmax_range_report_aligned(
+    client: TikTokAdsClient,
+    advertiser_id: str,
+    store_ids: List[str],
+    start_date: str,
+    end_date: str,
+    shop_tz: str = "America/Los_Angeles",
+) -> Dict[str, Any]:
+    """GMVMAX date-range report, shop-tz aligned per day.
+
+    Loops each day in [start, end], calls `get_gmvmax_report_aligned` (which
+    fetches hourly data and slices to shop_tz day boundary), and sums. The
+    per-day shop-tz alignment matches AdCostCache writes (also via the same
+    aligned fetcher), so cache-first reads return identical numbers.
+
+    Slower than `get_gmvmax_range_report` (N HTTP calls vs 1) but produces
+    shop-day-correct totals regardless of advertiser tz config.
+    """
+    import asyncio as _asyncio
+
+    from .gmvmax_report_aligned import get_gmvmax_report_aligned
+
+    days = _date_iter(start_date, end_date)
+    if not days:
+        return {"cost": 0.0, "gmv": 0.0, "orders": 0, "roi": 0.0}
+
+    # Fetch days concurrently — client's Semaphore(5) caps real concurrency.
+    per_day = await _asyncio.gather(
+        *(
+            get_gmvmax_report_aligned(client, advertiser_id, d, store_ids, shop_tz)
+            for d in days
+        )
+    )
+
+    total_cost = 0.0
+    total_gmv = 0.0
+    total_orders = 0
+    for r in per_day:
+        m = r.get("metrics", {})
+        total_cost += float(m.get("cost", 0))
+        total_gmv += float(m.get("gross_revenue", 0))
+        total_orders += int(m.get("orders", 0))
+
+    return {
+        "cost": round(total_cost, 2),
+        "gmv": round(total_gmv, 2),
+        "orders": total_orders,
+        "roi": round(total_gmv / total_cost, 2) if total_cost > 0 else 0.0,
+    }
+
+
+async def get_ads_range_report_aligned(
+    client: TikTokAdsClient,
+    advertiser_id: str,
+    start_date: str,
+    end_date: str,
+    shop_tz: str = "America/Los_Angeles",
+) -> Dict[str, Any]:
+    """Ads date-range report, shop-tz aligned per day.
+
+    Companion to `get_gmvmax_range_report_aligned`. See that docstring for
+    motivation.
+    """
+    import asyncio as _asyncio
+
+    from .ads_report_aligned import get_ads_report_aligned
+
+    days = _date_iter(start_date, end_date)
+    if not days:
+        return {"cost": 0.0, "gmv": 0.0, "orders": 0, "roas": 0.0}
+
+    per_day = await _asyncio.gather(
+        *(get_ads_report_aligned(client, advertiser_id, d, shop_tz) for d in days)
+    )
+
+    total_cost = 0.0
+    total_gmv = 0.0
+    total_orders = 0
+    for r in per_day:
+        m = r.get("metrics", {})
+        total_cost += float(m.get("cost", 0))
+        total_gmv += float(m.get("gmv", 0))
+        total_orders += int(m.get("orders", 0))
+
+    return {
+        "cost": round(total_cost, 2),
+        "gmv": round(total_gmv, 2),
+        "orders": total_orders,
+        "roas": round(total_gmv / total_cost, 2) if total_cost > 0 else 0.0,
+    }

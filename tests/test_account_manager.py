@@ -488,7 +488,9 @@ async def test_multi_store_range_api_and_cache_paths_agree_per_store(manager, ca
             "shared_adv", date, "gmvmax", 2500.0, 5000.0, 80, store_id="store_Hii"
         )
 
-    async def fake_fetch_range_report(adv, ad_type, store_id, start, end):
+    async def fake_fetch_range_report(
+        adv, ad_type, store_id, start, end, aligned=False, shop_tz="America/Los_Angeles"
+    ):
         # API filters by store; return store-specific 3-day total
         per_day = {"store_FN": 1000.0, "store_Hii": 2500.0}
         return {
