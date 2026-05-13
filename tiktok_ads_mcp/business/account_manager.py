@@ -41,6 +41,7 @@ class AdAccountManager:
         client_factory=None,
         discovery_cache: Optional["AccountDiscoveryCache"] = None,
         editor_data_cache: Optional[EditorDataCache] = None,
+        activity_cache: Optional["AdvertiserActivityCache"] = None,
     ):
         self._client = client
         self._client_factory = client_factory
@@ -49,6 +50,7 @@ class AdAccountManager:
         self.balance_cache = balance_cache
         self.discovery_cache = discovery_cache
         self.editor_data_cache = editor_data_cache
+        self.activity_cache = activity_cache
 
     @property
     def client(self) -> TikTokAdsClient:
@@ -607,6 +609,41 @@ class AdAccountManager:
                     )
                     return zero
 
+        # Active Roster Filter (F0): decide whether to skip an unneeded API call.
+        # Only consulted when legacy ban-aware paths above didn't already return.
+        # Mode 'off' (default) → no-op; 'shadow' → log decision but still fetch;
+        # 'on' → enforce SKIP_* by returning zero.
+        if self.activity_cache and self.ban_status_cache and self.discovery_cache:
+            try:
+                from .active_roster import get_mode, should_fetch
+                from zoneinfo import ZoneInfo
+
+                roster_mode = get_mode()
+                if roster_mode != "off":
+                    now_shop = datetime.now(ZoneInfo(shop_tz))
+                    dec = should_fetch(
+                        advertiser_id,
+                        store_id_for_cache,
+                        ad_type.lower(),
+                        shop_today=date_str,
+                        shop_now_hour=now_shop.hour,
+                        shop_now_weekday=now_shop.weekday(),
+                        banned=banned,
+                        ban_cache=self.ban_status_cache,
+                        discovery_cache=self.discovery_cache,
+                        activity_cache=self.activity_cache,
+                    )
+                    logger.info(
+                        f"[active_roster:{roster_mode}] adv=...{advertiser_id[-6:]} "
+                        f"store={store_id_for_cache} type={ad_type} period={period} "
+                        f"decision={dec.decision.value} reason={dec.reason} "
+                        f"days_since_spend={dec.days_since_spend}"
+                    )
+                    if roster_mode == "on" and not dec.fetch:
+                        return zero
+            except Exception as e:  # noqa: BLE001 — never let filter take down fetch
+                logger.error(f"[active_roster] filter error, fallback to FETCH: {e}")
+
         # Not banned, or banned + today (same-day ban): try API
         try:
             m = await self._fetch_single_report(
@@ -626,6 +663,18 @@ class AdAccountManager:
                 m["orders"],
                 store_id=store_id_for_cache,
             )
+            # Active Roster: record probe for future decay decisions.
+            if self.activity_cache:
+                try:
+                    self.activity_cache.record_probe(
+                        advertiser_id,
+                        store_id_for_cache,
+                        ad_type.lower(),
+                        date_str,
+                        m["cost"],
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.error(f"[active_roster] record_probe error: {e}")
             if banned and m["cost"] > 0:
                 logger.info(
                     f"{ad_type} ...{advertiser_id[-6:]}: "
