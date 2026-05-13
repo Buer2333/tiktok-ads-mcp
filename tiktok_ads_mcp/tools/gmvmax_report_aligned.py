@@ -136,7 +136,12 @@ async def get_gmvmax_report_aligned(
     for row in all_rows:
         dims = row.get("dimensions", {})
         hour_str = dims.get("stat_time_hour", "")
-        if not hour_str:
+        # TikTok occasionally returns "-" as a placeholder when an advertiser
+        # has no hourly data for the queried period. Skip those rows instead
+        # of letting strptime raise (which fires transient-error retry chains
+        # — empirically +4 min runtime per ~30 rows; 2026-05-12 team_lead
+        # regression root cause).
+        if not hour_str or hour_str == "-":
             continue
 
         utc_dt = hour_to_utc(hour_str, ad_zone)
@@ -283,7 +288,8 @@ async def get_gmvmax_report_aligned_breakdown(
         dims = row.get("dimensions", {})
         hour_str = dims.get("stat_time_hour", "")
         store_id = str(dims.get("store_id", ""))
-        if not hour_str or not store_id:
+        # See note above re. TikTok's "-" placeholder for empty hourly buckets.
+        if not hour_str or hour_str == "-" or not store_id:
             continue
 
         utc_dt = hour_to_utc(hour_str, ad_zone)

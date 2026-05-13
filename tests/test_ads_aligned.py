@@ -211,3 +211,36 @@ async def test_cross_tz_offhours_no_false_partial_alarm():
     assert result["metrics"]["cost"] > 0
     assert result["hours_included"] >= 14  # off-hours legitimately missing
     assert client._make_request.call_count == 2  # no retries
+
+
+@pytest.mark.asyncio
+async def test_dash_placeholder_hour_str_skipped(mock_client):
+    """TikTok returns '-' as stat_time_hour for advertisers with no hourly
+    data — must skip the row instead of letting strptime raise.
+
+    2026-05-12 regression: team_lead_report ran 29 such errors → +4 min
+    runtime via retry chain. See gmvmax_report_aligned.py / ads_report_aligned.py
+    inline comment.
+    """
+    mock_client._make_request.side_effect = [
+        _tz_response("UTC"),
+        _hourly_response(
+            [
+                _make_hourly_row("-", 0.0, 0.0, 0),  # placeholder row
+                _make_hourly_row("2026-03-10 10:00:00", 10.0, 50.0, 2),
+                _make_hourly_row("2026-03-10 11:00:00", 15.0, 75.0, 3),
+            ]
+        ),
+    ]
+    with patch("tiktok_ads_mcp.tools.ads_report_aligned.datetime") as mock_dt:
+        mock_dt.now.return_value = datetime(2026, 3, 10, 23, 59, tzinfo=timezone.utc)
+        mock_dt.strptime = datetime.strptime
+        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+
+        result = await get_ads_report_aligned(
+            mock_client, "123", "2026-03-10", shop_tz="UTC"
+        )
+
+    # Valid rows summed correctly; "-" row silently skipped (no exception)
+    assert result["metrics"]["cost"] == 25.0
+    assert result["hours_included"] == 2
