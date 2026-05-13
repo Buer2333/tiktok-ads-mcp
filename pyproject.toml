@@ -49,6 +49,11 @@ dev = [
     "build>=1.0.0",
 ]
 
+[tool.pytest.ini_options]
+markers = [
+    "perf: performance / API-budget regression tests (block merge on regression)",
+]
+
 [tool.hatch.metadata]
 allow-direct-references = true
 

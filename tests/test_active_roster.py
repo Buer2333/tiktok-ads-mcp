@@ -149,15 +149,34 @@ def test_status_limit_does_not_skip_when_active(caches):
     assert dec.decision == Decision.FETCH_HOT
 
 
-def test_fetch_grace_new_advertiser(caches):
-    """gmvmax advertiser discovered 3 days ago, no spend → grace."""
-    caches["discovery"].put(
-        "adv1", store_ids=[STORE_A], ad_type="gmvmax", ad_name="new"
+def test_fetch_grace_new_advertiser(caches, tmp_path):
+    """gmvmax advertiser discovered 3 days ago, no spend → grace.
+
+    Explicit discovered_at avoids brittleness when test runs on a date
+    after the hardcoded TODAY (real bug: 5/13 run treated TODAY=5/12 as
+    "before discovery" yielding days_since_discovery=-1).
+    """
+    import json
+
+    cache_file = tmp_path / "account_discovery.json"
+    cache_file.write_text(
+        json.dumps(
+            {
+                "adv1": {
+                    "store_ids": [STORE_A],
+                    "ad_type": "gmvmax",
+                    "ad_name": "new",
+                    "discovered_at": "2026-05-09",  # 3 days before TODAY
+                    "last_seen": "2026-05-09",
+                    "banned": False,
+                }
+            }
+        )
     )
-    # discovered_at == today by default in AccountDiscoveryCache.put
+    caches["discovery"] = AccountDiscoveryCache(cache_dir=tmp_path)
     dec = _decide(caches)
     assert dec.decision == Decision.FETCH_GRACE
-    assert dec.days_since_discovery == 0
+    assert dec.days_since_discovery == 3
 
 
 def test_grace_period_ends_at_day_7(caches, tmp_path):
