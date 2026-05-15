@@ -20,8 +20,17 @@ from typing import Any, Dict, List
 from mcp_retry import api_retry
 
 from ..client import TikTokAdsClient, TikTokRateLimitError
+from ..currency_cache import get_currency as _get_currency
+from ..fx import get_rate_to_usd as _get_rate_to_usd
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_day(stat_time_day: str) -> str:
+    """`'2026-05-14 00:00:00'` → `'2026-05-14'`."""
+    if not stat_time_day:
+        return ""
+    return stat_time_day.split(" ")[0]
 
 
 def _date_iter(start_date: str, end_date: str) -> List[str]:
@@ -54,7 +63,10 @@ async def get_gmvmax_range_report(
     Returns:
         Dict with cost, gmv, orders, roi.
     """
-    total = {"cost": 0.0, "gmv": 0.0, "orders": 0}
+    # Per-day rows let us FX-convert each day at its own ECB rate before summing.
+    # For USD accounts this is a no-op multiply; for THB/MXN/etc the rate drifts
+    # day-to-day and per-day conversion stays accurate to ~0.1%.
+    by_day: Dict[str, Dict[str, float]] = {}
     page = 1
 
     while True:
@@ -63,7 +75,7 @@ async def get_gmvmax_range_report(
             "store_ids": json.dumps(store_ids),
             "start_date": start_date,
             "end_date": end_date,
-            "dimensions": json.dumps(["advertiser_id"]),
+            "dimensions": json.dumps(["advertiser_id", "stat_time_day"]),
             "metrics": json.dumps(["cost", "gross_revenue", "orders"]),
             "page": page,
             "page_size": 1000,
@@ -80,15 +92,30 @@ async def get_gmvmax_range_report(
 
         items = response.get("data", {}).get("list", [])
         for item in items:
+            dims = item.get("dimensions", {})
+            day = _normalize_day(dims.get("stat_time_day", ""))
+            if not day:
+                continue
             m = item.get("metrics", {})
-            total["cost"] += float(m.get("cost", 0))
-            total["gmv"] += float(m.get("gross_revenue", 0))
-            total["orders"] += int(m.get("orders", 0))
+            bucket = by_day.setdefault(day, {"cost": 0.0, "gmv": 0.0, "orders": 0})
+            bucket["cost"] += float(m.get("cost", 0))
+            bucket["gmv"] += float(m.get("gross_revenue", 0))
+            bucket["orders"] += int(m.get("orders", 0))
 
         page_info = response.get("data", {}).get("page_info", {})
         if page >= page_info.get("total_page", 1) or not items:
             break
         page += 1
+
+    currency = (await _get_currency(client, advertiser_id)) or "USD"
+    total = {"cost": 0.0, "gmv": 0.0, "orders": 0}
+    for day, bucket in by_day.items():
+        rate = (
+            await _get_rate_to_usd(currency, day) if currency.upper() != "USD" else 1.0
+        )
+        total["cost"] += bucket["cost"] * rate
+        total["gmv"] += bucket["gmv"] * rate
+        total["orders"] += bucket["orders"]
 
     total["roi"] = round(total["gmv"] / total["cost"], 2) if total["cost"] > 0 else 0.0
     total["cost"] = round(total["cost"], 2)
@@ -115,7 +142,9 @@ async def get_gmvmax_range_report_breakdown(
     groups via STORE_PRODUCT_GROUP without depending on bitable's per-row
     (advertiser, store) binding being correct.
     """
-    by_store: Dict[str, Dict[str, float]] = {}
+    # Per (store, day) rows so FX conversion stays per-day accurate when the
+    # advertiser is non-USD. For USD accounts the day-axis collapses harmlessly.
+    by_store_day: Dict[str, Dict[str, Dict[str, float]]] = {}
     page = 1
 
     while True:
@@ -124,7 +153,7 @@ async def get_gmvmax_range_report_breakdown(
             "store_ids": json.dumps(store_ids),
             "start_date": start_date,
             "end_date": end_date,
-            "dimensions": json.dumps(["store_id"]),
+            "dimensions": json.dumps(["store_id", "stat_time_day"]),
             "metrics": json.dumps(["cost", "gross_revenue", "orders"]),
             "page": page,
             "page_size": 1000,
@@ -141,12 +170,12 @@ async def get_gmvmax_range_report_breakdown(
         for item in items:
             dims = item.get("dimensions", {})
             store_id = str(dims.get("store_id", ""))
-            if not store_id:
+            day = _normalize_day(dims.get("stat_time_day", ""))
+            if not store_id or not day:
                 continue
             m = item.get("metrics", {})
-            bucket = by_store.setdefault(
-                store_id, {"cost": 0.0, "gmv": 0.0, "orders": 0}
-            )
+            day_map = by_store_day.setdefault(store_id, {})
+            bucket = day_map.setdefault(day, {"cost": 0.0, "gmv": 0.0, "orders": 0})
             bucket["cost"] += float(m.get("cost", 0))
             bucket["gmv"] += float(m.get("gross_revenue", 0))
             bucket["orders"] += int(m.get("orders", 0))
@@ -156,14 +185,25 @@ async def get_gmvmax_range_report_breakdown(
             break
         page += 1
 
+    currency = (await _get_currency(client, advertiser_id)) or "USD"
     out: Dict[str, Dict[str, Any]] = {}
-    for store_id, bucket in by_store.items():
-        cost = bucket["cost"]
-        gmv = bucket["gmv"]
+    for store_id, day_map in by_store_day.items():
+        agg = {"cost": 0.0, "gmv": 0.0, "orders": 0}
+        for day, bucket in day_map.items():
+            rate = (
+                await _get_rate_to_usd(currency, day)
+                if currency.upper() != "USD"
+                else 1.0
+            )
+            agg["cost"] += bucket["cost"] * rate
+            agg["gmv"] += bucket["gmv"] * rate
+            agg["orders"] += bucket["orders"]
+        cost = agg["cost"]
+        gmv = agg["gmv"]
         out[store_id] = {
             "cost": round(cost, 2),
             "gmv": round(gmv, 2),
-            "orders": bucket["orders"],
+            "orders": agg["orders"],
             "roi": round(gmv / cost, 2) if cost > 0 else 0.0,
         }
     return out
@@ -186,7 +226,8 @@ async def get_ads_range_report(
     Returns:
         Dict with cost, gmv, orders, roas.
     """
-    total = {"cost": 0.0, "gmv": 0.0, "orders": 0}
+    # Per-day rows for FX conversion. See get_gmvmax_range_report for rationale.
+    by_day: Dict[str, Dict[str, float]] = {}
     page = 1
 
     while True:
@@ -194,7 +235,7 @@ async def get_ads_range_report(
             "advertiser_id": advertiser_id,
             "report_type": "BASIC",
             "data_level": "AUCTION_ADVERTISER",
-            "dimensions": json.dumps(["advertiser_id"]),
+            "dimensions": json.dumps(["advertiser_id", "stat_time_day"]),
             "metrics": json.dumps(
                 ["spend", "onsite_shopping", "total_onsite_shopping_value"]
             ),
@@ -210,15 +251,30 @@ async def get_ads_range_report(
 
         items = response.get("data", {}).get("list", [])
         for item in items:
+            dims = item.get("dimensions", {})
+            day = _normalize_day(dims.get("stat_time_day", ""))
+            if not day:
+                continue
             m = item.get("metrics", {})
-            total["cost"] += float(m.get("spend", 0))
-            total["gmv"] += float(m.get("total_onsite_shopping_value", 0))
-            total["orders"] += int(m.get("onsite_shopping", 0))
+            bucket = by_day.setdefault(day, {"cost": 0.0, "gmv": 0.0, "orders": 0})
+            bucket["cost"] += float(m.get("spend", 0))
+            bucket["gmv"] += float(m.get("total_onsite_shopping_value", 0))
+            bucket["orders"] += int(m.get("onsite_shopping", 0))
 
         page_info = response.get("data", {}).get("page_info", {})
         if page >= page_info.get("total_page", 1) or not items:
             break
         page += 1
+
+    currency = (await _get_currency(client, advertiser_id)) or "USD"
+    total = {"cost": 0.0, "gmv": 0.0, "orders": 0}
+    for day, bucket in by_day.items():
+        rate = (
+            await _get_rate_to_usd(currency, day) if currency.upper() != "USD" else 1.0
+        )
+        total["cost"] += bucket["cost"] * rate
+        total["gmv"] += bucket["gmv"] * rate
+        total["orders"] += bucket["orders"]
 
     total["roas"] = round(total["gmv"] / total["cost"], 2) if total["cost"] > 0 else 0.0
     total["cost"] = round(total["cost"], 2)

@@ -17,13 +17,18 @@ def mock_client():
     return client
 
 
-def _gmvmax_response(cost: float, gmv: float, orders: int) -> dict:
+def _gmvmax_response(
+    cost: float, gmv: float, orders: int, day: str = "2026-03-01"
+) -> dict:
     return {
         "code": 0,
         "data": {
             "list": [
                 {
-                    "dimensions": {"advertiser_id": "123"},
+                    "dimensions": {
+                        "advertiser_id": "123",
+                        "stat_time_day": f"{day} 00:00:00",
+                    },
                     "metrics": {
                         "cost": str(cost),
                         "gross_revenue": str(gmv),
@@ -36,13 +41,18 @@ def _gmvmax_response(cost: float, gmv: float, orders: int) -> dict:
     }
 
 
-def _ads_response(spend: float, gmv: float, orders: int) -> dict:
+def _ads_response(
+    spend: float, gmv: float, orders: int, day: str = "2026-03-01"
+) -> dict:
     return {
         "code": 0,
         "data": {
             "list": [
                 {
-                    "dimensions": {"advertiser_id": "123"},
+                    "dimensions": {
+                        "advertiser_id": "123",
+                        "stat_time_day": f"{day} 00:00:00",
+                    },
                     "metrics": {
                         "spend": str(spend),
                         "total_onsite_shopping_value": str(gmv),

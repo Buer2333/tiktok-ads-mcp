@@ -16,6 +16,8 @@ from ..client import (
     TikTokIncompleteDataError,
     TikTokRateLimitError,
 )
+from ..currency_cache import get_currency as _get_currency
+from ..fx import get_rate_to_usd as _get_rate_to_usd
 from ..timezone import day_utc_range, hour_to_utc, native_dates_for_day, parse_tz
 from ..tz_cache import get_ad_tz as _get_ad_tz
 
@@ -176,12 +178,27 @@ async def get_ads_report_aligned(
                 f"likely token rate-limit truncated mid-window"
             )
 
+    # FX: convert monetary metrics from advertiser native currency to USD.
+    # See gmvmax_report_aligned for the full rationale (TikTok report metrics
+    # are returned in advertiser-native currency; the rest of the system
+    # assumes USD). orders/onsite_shopping is dimensionless and passes
+    # through unchanged.
+    currency = (await _get_currency(client, advertiser_id)) or "USD"
+    fx_rate = 1.0
+    if currency.upper() != "USD":
+        fx_rate = await _get_rate_to_usd(currency, date)
+        cost *= fx_rate
+        gmv *= fx_rate
+
     roas = round(gmv / cost, 2) if cost > 0 else 0.0
 
     return {
         "date": date,
         "shop_tz": shop_tz,
         "ad_tz": str(ad_zone),
+        "currency": "USD",
+        "source_currency": currency.upper(),
+        "fx_rate": fx_rate,
         "metrics": {
             "cost": round(cost, 2),
             "gmv": round(gmv, 2),

@@ -151,6 +151,49 @@ async def test_future_hours_filtered(mock_client):
 
 
 @pytest.mark.asyncio
+async def test_thb_account_costs_converted_to_usd(mock_client):
+    """A THB-currency advertiser must have cost/gross_revenue converted at the
+    day's FX rate before returning. Regression for the 2026-05-14 NAD+ incident
+    where AMSOLAR (THB) reported 26,691 THB and was treated as $26,691 USD,
+    inflating ROI denominator 33×."""
+    from tiktok_ads_mcp import currency_cache as _ccm
+    from tiktok_ads_mcp import fx as _fxm
+
+    # Inject THB for this advertiser and stub FX rate to a known value.
+    _ccm._currency_cache["amsolar"] = "THB"
+    mock_client._make_request.side_effect = [
+        _tz_response("UTC"),
+        _hourly_response(
+            [
+                _make_hourly_row("2026-05-14 10:00:00", 10000.0, 8000.0, 1),
+                _make_hourly_row("2026-05-14 11:00:00", 16691.77, 15327.87, 2),
+            ]
+        ),
+    ]
+
+    with (
+        patch("tiktok_ads_mcp.tools.gmvmax_report_aligned.datetime") as mock_dt,
+        patch.object(_fxm, "_fetch_from_frankfurter", AsyncMock(return_value=0.0303)),
+    ):
+        mock_dt.now.return_value = datetime(2026, 5, 14, 23, 0, tzinfo=timezone.utc)
+        mock_dt.strptime = datetime.strptime
+        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+
+        result = await get_gmvmax_report_aligned(
+            mock_client, "amsolar", "2026-05-14", ["store1"], shop_tz="UTC"
+        )
+
+    # Raw THB: cost=26,691.77 / gmv=23,327.87 → USD@0.0303
+    assert result["currency"] == "USD"
+    assert result["source_currency"] == "THB"
+    assert result["fx_rate"] == 0.0303
+    assert round(result["metrics"]["cost"], 2) == round(26691.77 * 0.0303, 2)
+    assert round(result["metrics"]["gross_revenue"], 2) == round(23327.87 * 0.0303, 2)
+    # ROI is dimensionless and unchanged by FX.
+    assert result["roi"] == round(23327.87 / 26691.77, 2)
+
+
+@pytest.mark.asyncio
 async def test_empty_data_returns_zeros(mock_client):
     """No data → zero metrics and 0 hours."""
     mock_client._make_request.side_effect = [

@@ -16,12 +16,18 @@ from ..client import (
     TikTokIncompleteDataError,
     TikTokRateLimitError,
 )
+from ..currency_cache import get_currency as _get_currency
+from ..fx import get_rate_to_usd as _get_rate_to_usd
 from ..timezone import day_utc_range, hour_to_utc, native_dates_for_day, parse_tz
 from ..tz_cache import get_ad_tz as _get_ad_tz
 
 logger = logging.getLogger(__name__)
 
 ALIGNED_DEFAULT_METRICS = ["cost", "gross_revenue", "orders"]
+
+# Metrics whose values are monetary (need FX conversion when advertiser
+# currency != USD). Non-monetary metrics like `orders` pass through unchanged.
+_MONETARY_METRICS = {"cost", "gross_revenue", "net_cost"}
 
 # TikTok hourly reports typically lag 1-2h behind real time; tolerate that
 # many missing hours before flagging a response as incomplete.
@@ -159,6 +165,13 @@ async def get_gmvmax_report_aligned(
             if last_row_utc is None or utc_dt > last_row_utc:
                 last_row_utc = utc_dt
 
+    # FX-convert monetary metrics to USD. Done after the completeness check
+    # below would have run on raw cost, so the lag detection still triggers on
+    # the same magnitudes operations have historically seen. Conversion happens
+    # before the response is returned so cache writers (account_manager) and
+    # all downstream readers see USD.
+    currency = (await _get_currency(client, advertiser_id)) or "USD"
+
     cost = aggregated.get("cost", 0.0)
     gmv = aggregated.get("gross_revenue", 0.0)
     roi = round(gmv / cost, 2) if cost > 0 else 0.0
@@ -185,6 +198,25 @@ async def get_gmvmax_report_aligned(
                 f"likely token rate-limit truncated mid-window"
             )
 
+    # FX: convert monetary metrics from advertiser native currency to USD.
+    # Non-USD advertisers (THB / MXN / etc.) report raw native amounts; the
+    # rest of the system (cache, dashboards, ROI math) assumes USD. The
+    # completeness check above already ran on raw cost so the operator-facing
+    # error message magnitude is unchanged for non-USD accounts.
+    fx_rate = 1.0
+    if currency.upper() != "USD":
+        fx_rate = await _get_rate_to_usd(currency, date)
+        for k in list(aggregated.keys()):
+            if k in _MONETARY_METRICS:
+                aggregated[k] = aggregated[k] * fx_rate
+        # ROI is dimensionless (gmv/cost) — rate cancels, but recompute against
+        # converted values for consistency with downstream rounding semantics.
+        roi = (
+            round(aggregated.get("gross_revenue", 0.0) / aggregated["cost"], 2)
+            if aggregated.get("cost", 0) > 0
+            else 0.0
+        )
+
     # Round monetary values
     for m in aggregated:
         aggregated[m] = round(aggregated[m], 2)
@@ -193,6 +225,9 @@ async def get_gmvmax_report_aligned(
         "date": date,
         "shop_tz": shop_tz,
         "ad_tz": str(ad_zone),
+        "currency": "USD",
+        "source_currency": currency.upper(),
+        "fx_rate": fx_rate,
         "metrics": aggregated,
         "roi": roi,
         "hours_included": hours_included,
