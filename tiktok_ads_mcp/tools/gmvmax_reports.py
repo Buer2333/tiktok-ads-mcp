@@ -18,9 +18,22 @@ Filtering: campaign_ids, item_group_ids
 
 import json
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Any, Dict, List, Optional
+
+from ..currency_cache import get_currency as _get_currency
+from ..fx import get_rate_to_usd as _get_rate_to_usd
 
 logger = logging.getLogger(__name__)
+
+# Metrics whose values are monetary (need FX conversion when advertiser
+# currency != USD). cost_per_order is monetary; roi is dimensionless
+# (gmv/cost — rate cancels); net_cost is cash-out denominator.
+_MONETARY_METRICS = {"cost", "gross_revenue", "net_cost", "cost_per_order"}
+
+# Metrics whose values are monetary (need FX conversion when advertiser
+# currency != USD). cost_per_order is also monetary; roi is dimensionless
+# (gmv/cost — rate cancels); net_cost is the cash-out denominator.
+_MONETARY_METRICS = {"cost", "gross_revenue", "net_cost", "cost_per_order"}
 
 # Full metrics available on /gmv_max/report/get/
 GMVMAX_DEFAULT_METRICS = [
@@ -61,7 +74,7 @@ async def get_gmvmax_reports(
     filtering: Optional[Dict] = None,
     page: int = 1,
     page_size: int = 1000,
-    **kwargs
+    **kwargs,
 ) -> Dict[str, Any]:
     """Get GMV Max performance reports via dedicated /gmv_max/report/get/ endpoint.
 
@@ -96,41 +109,88 @@ async def get_gmvmax_reports(
         metrics = GMVMAX_DEFAULT_METRICS
 
     params = {
-        'advertiser_id': advertiser_id,
-        'start_date': start_date,
-        'end_date': end_date,
-        'dimensions': json.dumps(dimensions),
-        'metrics': json.dumps(metrics),
-        'page': page,
-        'page_size': page_size,
+        "advertiser_id": advertiser_id,
+        "start_date": start_date,
+        "end_date": end_date,
+        "dimensions": json.dumps(dimensions),
+        "metrics": json.dumps(metrics),
+        "page": page,
+        "page_size": page_size,
     }
 
     if store_ids:
-        params['store_ids'] = json.dumps(store_ids)
+        params["store_ids"] = json.dumps(store_ids)
 
     if filtering:
-        params['filtering'] = json.dumps(filtering)
+        params["filtering"] = json.dumps(filtering)
 
     try:
-        response = await client._make_request('GET', 'gmv_max/report/get/', params)
+        response = await client._make_request("GET", "gmv_max/report/get/", params)
 
-        if response.get('code') == 0:
-            data = response.get('data', {})
+        if response.get("code") == 0:
+            data = response.get("data", {})
+
+            # FX: convert monetary metric values from advertiser-native currency
+            # to USD. Item-level callers (material_report) and per-day callers
+            # (range_reports.get_gmvmax_range_report) both flow through here.
+            # USD advertisers fast-path with rate=1.0 (no HTTP).
+            currency = (await _get_currency(client, advertiser_id)) or "USD"
+            need_fx = currency.upper() != "USD"
+
+            # Pre-resolve a fallback rate for rows missing stat_time_day. For
+            # ranges spanning multiple days without a day dimension, use
+            # end_date — the most recent rate best represents currently-active
+            # spend. Single-day queries see start_date == end_date so this is
+            # exactly right; the wider-window case is a small interpolation
+            # error (typically <0.5% for stable currencies like THB).
+            fallback_rate = 1.0
+            if need_fx:
+                fallback_rate = await _get_rate_to_usd(currency, end_date)
 
             report_data = {
                 "page_info": data.get("page_info", {}),
-                "list": []
+                "list": [],
+                "currency": "USD",
+                "source_currency": currency.upper(),
             }
 
             for item in data.get("list", []):
-                report_data["list"].append({
-                    "dimensions": item.get("dimensions", {}),
-                    "metrics": item.get("metrics", {})
-                })
+                dims = item.get("dimensions", {})
+                metrics = dict(item.get("metrics", {}))  # copy — caller-safe
+
+                if need_fx:
+                    # Per-row rate when stat_time_day is in dimensions; else
+                    # the pre-resolved fallback.
+                    row_day = dims.get("stat_time_day", "")
+                    if row_day:
+                        row_day = str(row_day).split(" ")[0]
+                        rate = await _get_rate_to_usd(currency, row_day)
+                    else:
+                        rate = fallback_rate
+                    for k in list(metrics.keys()):
+                        if k in _MONETARY_METRICS:
+                            raw = metrics.get(k)
+                            if raw in (None, ""):
+                                continue
+                            try:
+                                metrics[k] = str(round(float(raw) * rate, 4))
+                            except (ValueError, TypeError):
+                                # Non-numeric (e.g. creative_delivery_status
+                                # if ever miscategorized) — leave as-is.
+                                pass
+
+                report_data["list"].append(
+                    {
+                        "dimensions": dims,
+                        "metrics": metrics,
+                    }
+                )
 
             return report_data
         else:
-            raise Exception(f"API returned code {response.get('code')}: {response.get('message', 'Unknown error')}")
+            raise Exception(
+                f"API returned code {response.get('code')}: {response.get('message', 'Unknown error')}"
+            )
 
     except Exception as e:
         logger.error(f"Failed to get GMV Max reports: {e}")
