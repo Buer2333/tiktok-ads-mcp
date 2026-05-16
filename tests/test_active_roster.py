@@ -427,3 +427,135 @@ def test_shop_today_invalid_format_no_crash(caches):
     )
     # days_since_spend resolved to None due to bad today → weekly window
     assert dec.decision == Decision.SKIP_COLD_WEEKLY
+
+
+# ── Cross-store recently-seen fallback (clause 3b) ──
+
+
+def test_fetch_recently_seen_when_activity_miss_and_discovery_fresh(caches, tmp_path):
+    """Regression: FlyNew-MX ...896976 had activity record keyed by an old
+    store_id; after reassignment, (adv, new_store, gmvmax) misses but
+    discovery.last_seen is recent. Must FETCH instead of SKIP."""
+    import json
+
+    cache_file = tmp_path / "account_discovery.json"
+    cache_file.write_text(
+        json.dumps(
+            {
+                "adv1": {
+                    "store_ids": [STORE_A],
+                    "ad_type": "gmvmax",
+                    "ad_name": "reassigned",
+                    # discovered long ago — past 7d grace
+                    "discovered_at": "2026-03-01",
+                    # but seen by discovery yesterday — actively running
+                    "last_seen": "2026-05-11",
+                    "banned": False,
+                }
+            }
+        )
+    )
+    caches["discovery"] = AccountDiscoveryCache(cache_dir=tmp_path)
+    # Note: activity_cache deliberately empty for (adv1, STORE_A, gmvmax) —
+    # simulating the cross-store reassignment.
+    dec = _decide(caches)
+    assert dec.decision == Decision.FETCH_RECENTLY_SEEN
+    assert dec.fetch is True
+    assert dec.days_since_spend is None
+
+
+def test_recently_seen_fallback_doesnt_fire_when_last_seen_stale(caches, tmp_path):
+    """If discovery.last_seen > 7 days ago, fallback does NOT fire — keeps
+    existing SKIP_COLD_WEEKLY behavior for genuinely-cold accounts."""
+    import json
+
+    cache_file = tmp_path / "account_discovery.json"
+    cache_file.write_text(
+        json.dumps(
+            {
+                "adv1": {
+                    "store_ids": [STORE_A],
+                    "ad_type": "gmvmax",
+                    "ad_name": "really_cold",
+                    "discovered_at": "2026-01-01",
+                    "last_seen": "2026-04-20",  # 22 days ago
+                    "banned": False,
+                }
+            }
+        )
+    )
+    caches["discovery"] = AccountDiscoveryCache(cache_dir=tmp_path)
+    dec = _decide(caches)
+    assert dec.decision == Decision.SKIP_COLD_WEEKLY
+
+
+def test_recently_seen_fallback_doesnt_override_existing_spend_skip(caches, tmp_path):
+    """When activity_cache HAS a stale-spend record (e.g. 60 days), the
+    normal SKIP_COLD_WEEKLY path must win — fallback only fires when
+    activity has zero record for this key. Protects existing rate-limit
+    savings on truly cold accounts."""
+    import json
+
+    cache_file = tmp_path / "account_discovery.json"
+    cache_file.write_text(
+        json.dumps(
+            {
+                "adv1": {
+                    "store_ids": [STORE_A],
+                    "ad_type": "gmvmax",
+                    "ad_name": "old_but_recently_seen",
+                    "discovered_at": "2026-01-01",
+                    "last_seen": "2026-05-10",  # recent, but…
+                    "banned": False,
+                }
+            }
+        )
+    )
+    caches["discovery"] = AccountDiscoveryCache(cache_dir=tmp_path)
+    # …existing spend record from 60 days ago — genuinely dormant on this store.
+    # Use record_probe with a non-zero cost so last_spend_date gets set;
+    # record_probe with cost=0 only updates last_probe_date, leaving
+    # days_since_last_spend=None which would trip the new fallback.
+    caches["activity"].record_probe("adv1", STORE_A, "gmvmax", "2026-03-13", 50.0)
+    dec = _decide(caches)
+    assert dec.decision == Decision.SKIP_COLD_WEEKLY
+
+
+def test_recently_seen_does_not_apply_to_ads(caches, tmp_path):
+    """Ads accounts have no discovery entry → fallback is a no-op for them,
+    keeps existing decay path."""
+    # No discovery entry for ads adv → fallback inert
+    dec = _decide(caches, store="", ad_type="ads")
+    # No activity record, no discovery, never spent → weekly skip
+    assert dec.decision == Decision.SKIP_COLD_WEEKLY
+
+
+def test_recently_seen_doesnt_override_banned(caches, tmp_path):
+    """SKIP_BANNED short-circuits BEFORE fallback — banned accounts stay
+    skipped even if discovery saw them recently."""
+    import json
+
+    cache_file = tmp_path / "account_discovery.json"
+    cache_file.write_text(
+        json.dumps(
+            {
+                "adv1": {
+                    "store_ids": [STORE_A],
+                    "ad_type": "gmvmax",
+                    "ad_name": "banned_but_recent",
+                    "discovered_at": "2026-01-01",
+                    "last_seen": "2026-05-11",
+                    "banned": False,
+                }
+            }
+        )
+    )
+    caches["discovery"] = AccountDiscoveryCache(cache_dir=tmp_path)
+    caches["ban"].set_banned(
+        "adv1",
+        status="NO_ACCESS_CONFIRMED_BANNED",
+        detected_at="2026-05-10",
+        last_active_date="2026-05-09",
+    )
+    dec = _decide(caches, banned=True)
+    assert dec.decision == Decision.SKIP_BANNED

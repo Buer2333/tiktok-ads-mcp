@@ -25,6 +25,13 @@ Decision matrix (short-circuit order)
 2. banned=True AND status==NO_ACCESS_CONFIRMED_BANNED  → SKIP_BANNED
 3. days_since_discovery < 7 (gmvmax only, ads has no   → FETCH_GRACE
    discovery cache so this clause is skipped)
+3b. activity_cache MISS for (adv, store, type) AND      → FETCH_RECENTLY_SEEN
+    discovery.last_seen within 7 days. Catches the
+    cross-store mismatch case where an advertiser was
+    reassigned to a new store_id and the old activity
+    record's per-store key no longer matches. Does NOT
+    override existing cold-decay skip — only fires when
+    activity_cache has zero record for this exact key.
 4. days_since_last_spend:
      None or >= 31  → weekly window
                       now_weekday==0 AND now_hour==PROBE_HOUR → FETCH_WEEKLY_PROBE
@@ -58,6 +65,7 @@ class Decision(str, Enum):
     FETCH = "fetch"
     FETCH_HOT = "fetch_hot"
     FETCH_GRACE = "fetch_grace"
+    FETCH_RECENTLY_SEEN = "fetch_recently_seen"
     FETCH_DAILY_PROBE = "fetch_daily_probe"
     FETCH_WEEKLY_PROBE = "fetch_weekly_probe"
     SKIP_BANNED = "skip_banned"
@@ -70,6 +78,7 @@ _FETCH_DECISIONS = {
     Decision.FETCH,
     Decision.FETCH_HOT,
     Decision.FETCH_GRACE,
+    Decision.FETCH_RECENTLY_SEEN,
     Decision.FETCH_DAILY_PROBE,
     Decision.FETCH_WEEKLY_PROBE,
 }
@@ -204,6 +213,31 @@ def should_fetch(
             days_since_spend=days_since_spend,
             days_since_discovery=days_since_discovery,
         )
+
+    # 3b. Cross-store fallback: activity_cache has no record for THIS specific
+    # (advertiser, store, ad_type) key, but discovery saw the advertiser
+    # active within the last 7 days. This catches the case where an advertiser
+    # was reassigned to a new store (config change) — the old activity record
+    # is keyed by the previous store, so the per-store lookup misses and the
+    # advertiser would otherwise SKIP_COLD_WEEKLY despite running fresh spend
+    # on its current store. Only fires when activity_cache has no record at
+    # all for this key (days_since_spend is None) — does NOT override the
+    # normal cold-decay skip when there's a real stale-spend signal.
+    # Regression for FlyNew-MX-Shilajit ...896976 on 2026-05-15: cost=$174.27
+    # silently dropped because cache key used old store_id.
+    if days_since_spend is None and discovery_entry:
+        last_seen = discovery_entry.get("last_seen", "")
+        days_since_last_seen = _days_between(shop_today, last_seen)
+        if days_since_last_seen is not None and 0 <= days_since_last_seen < 7:
+            return RosterDecision(
+                decision=Decision.FETCH_RECENTLY_SEEN,
+                reason=(
+                    f"recently seen in discovery {days_since_last_seen}d ago, "
+                    f"no activity record for this store"
+                ),
+                days_since_spend=days_since_spend,
+                days_since_discovery=days_since_discovery,
+            )
 
     # 4. Spend-based decay tiers
     if days_since_spend is None or days_since_spend >= 31:
