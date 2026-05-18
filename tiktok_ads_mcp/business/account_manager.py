@@ -170,6 +170,19 @@ class AdAccountManager:
             f"{len(discovered)} new/changed exclusive accounts"
         )
 
+        # Phase 1b: backfill store binding for stale gmvmax entries with
+        # empty store_ids. Two sources of stale entries:
+        #   (1) Phase 2 path "campaigns exist but campaign_info.store_id=''"
+        #       (line ~270) writes store_ids=[] permanently.
+        #   (2) An advertiser later became exclusive on a store, but BC-wide
+        #       store_list response from previous scans didn't list that store
+        #       in the perspective of the any_adv_id used (observed 2026-05).
+        # First try the cheap path (use already-fetched `stores` response),
+        # then per-advertiser store_list calls for the remainder (capped).
+        backfilled = await self._backfill_empty_store_ids(stores, known_store_ids)
+        if backfilled:
+            discovered.extend(backfilled)
+
         # Phase 2: non-exclusive GMVMAX accounts via campaign_info
         all_authorized_ids = {a["advertiser_id"] for a in authorized_accounts}
         all_cached = (
@@ -207,6 +220,133 @@ class AdAccountManager:
             discovered.extend(phase2)
 
         return discovered
+
+    _BACKFILL_BATCH_LIMIT = 10  # Max per-advertiser store_list calls per run
+
+    async def _backfill_empty_store_ids(
+        self,
+        stores: List[Dict],
+        known_store_ids: Set[str],
+    ) -> List[Dict]:
+        """Backfill store binding for cached gmvmax entries with store_ids=[].
+
+        Step 1 (cheap, zero extra API): scan `stores` (already fetched in
+        Phase 1) for any exclusive_authorized_advertiser_info whose advertiser
+        is cached with empty store_ids — update those directly.
+
+        Step 2 (per-advertiser API call, capped by _BACKFILL_BATCH_LIMIT):
+        for the remainder, call get_gmvmax_store_list(adv_id) — that
+        advertiser's perspective always includes the store it is exclusive on.
+
+        Returns list of newly fixed accounts on known stores.
+        """
+        from ..tools.gmvmax_store_list import get_gmvmax_store_list
+
+        fixed = []
+        cache = self.discovery_cache._load()
+        stale_ids = [
+            adv_id
+            for adv_id, entry in cache.items()
+            if isinstance(entry, dict)
+            and entry.get("ad_type") == "gmvmax"
+            and not entry.get("store_ids")
+        ]
+        if not stale_ids:
+            return []
+
+        # Step 1: cheap pass using the response we already have
+        sid_by_exclusive = {}
+        for store in stores:
+            sid = store.get("store_id", "")
+            exc = store.get("exclusive_authorized_advertiser_info", {})
+            eid = exc.get("advertiser_id", "")
+            if sid and eid:
+                sid_by_exclusive[eid] = (sid, exc.get("advertiser_name", ""))
+
+        remaining = []
+        for adv_id in stale_ids:
+            if adv_id in sid_by_exclusive:
+                sid, name = sid_by_exclusive[adv_id]
+                existing = cache.get(adv_id, {})
+                self.discovery_cache.put(
+                    adv_id,
+                    store_ids=[sid],
+                    ad_type="gmvmax",
+                    ad_name=name or existing.get("ad_name", ""),
+                )
+                logger.info(f"discover backfill (cheap): {adv_id} → store {sid}")
+                if sid in known_store_ids:
+                    fixed.append(
+                        {
+                            "advertiser_id": adv_id,
+                            "ad_name": name or existing.get("ad_name", ""),
+                            "store_ids": [sid],
+                            "status": "BACKFILL_CHEAP",
+                        }
+                    )
+            else:
+                remaining.append(adv_id)
+
+        # Step 2: per-advertiser store_list for remaining (capped to limit
+        # API cost). Prioritize the least-recently-seen so all entries get
+        # checked over multiple runs.
+        if remaining:
+
+            def _last_seen(adv_id: str) -> str:
+                return cache.get(adv_id, {}).get("last_seen", "")
+
+            batch = sorted(remaining, key=_last_seen)[: self._BACKFILL_BATCH_LIMIT]
+            if len(remaining) > self._BACKFILL_BATCH_LIMIT:
+                logger.info(
+                    f"discover backfill: {len(remaining)} stale entries, "
+                    f"checking {len(batch)} this run (batch limit)"
+                )
+
+            for adv_id in batch:
+                try:
+                    resp = await get_gmvmax_store_list(self.client, adv_id)
+                except Exception as e:
+                    logger.warning(
+                        f"discover backfill: store_list failed for {adv_id}: {e}"
+                    )
+                    continue
+                stores_for_adv = resp.get("store_list", []) or []
+                found_sid = None
+                found_name = ""
+                for s in stores_for_adv:
+                    exc = s.get("exclusive_authorized_advertiser_info", {})
+                    if exc.get("advertiser_id") == adv_id:
+                        found_sid = s.get("store_id", "")
+                        found_name = exc.get("advertiser_name", "")
+                        break
+                if not found_sid:
+                    # Still not exclusive of any store; leave as-is for now
+                    continue
+                existing = cache.get(adv_id, {})
+                self.discovery_cache.put(
+                    adv_id,
+                    store_ids=[found_sid],
+                    ad_type="gmvmax",
+                    ad_name=found_name or existing.get("ad_name", ""),
+                )
+                logger.info(
+                    f"discover backfill (per-adv): {adv_id} → store {found_sid}"
+                )
+                if found_sid in known_store_ids:
+                    fixed.append(
+                        {
+                            "advertiser_id": adv_id,
+                            "ad_name": found_name or existing.get("ad_name", ""),
+                            "store_ids": [found_sid],
+                            "status": "BACKFILL_PER_ADV",
+                        }
+                    )
+
+        if fixed:
+            logger.info(
+                f"discover backfill: fixed {len(fixed)} entries on known stores"
+            )
+        return fixed
 
     _PHASE2_BATCH_LIMIT = 20  # Max accounts to check per run (cache builds up)
 

@@ -410,3 +410,151 @@ class TestDiscoverViaCampaigns:
         # Both cached with same store
         assert discovery_cache.get("ADV1")["store_ids"] == ["S1"]
         assert discovery_cache.get("ADV2")["store_ids"] == ["S1"]
+
+
+class TestBackfillEmptyStoreIds:
+    """Phase 1b: backfill store binding for cached gmvmax with store_ids=[].
+
+    Regression: 2026-05-18 Hiileathy Shilajit advertiser 7633354825347563521
+    was cached by Phase 2 with store_ids=[] (had campaigns but
+    campaign_info.store_id=""), later became exclusive of HIILEATHY Home but
+    Phase 1 didn't pick it up — enrich_with_discovery skipped it → daily
+    monthly report missed ~$5K cost. Backfill closes the loop.
+    """
+
+    @pytest.mark.asyncio
+    async def test_cheap_backfill_from_response(self, manager, discovery_cache):
+        """Cached entry with store_ids=[] is fixed by the Phase 1 response."""
+        # Pre-seed: ADV2 was cached as gmvmax with no store (Phase 2 path).
+        discovery_cache.put("ADV2", store_ids=[], ad_type="gmvmax", ad_name="Old Name")
+
+        # Today's store_list shows ADV2 as exclusive on S1.
+        store_resp = _make_store_list(
+            ("S1", "Store One", "ADV2", "Now-Exclusive", "STATUS_ENABLE"),
+        )
+        with patch(
+            "tiktok_ads_mcp.tools.gmvmax_store_list.get_gmvmax_store_list",
+            new_callable=AsyncMock,
+            return_value=store_resp,
+        ):
+            result = await manager.discover_new_accounts(
+                known_store_ids={"S1"},
+                authorized_accounts=_make_authorized(["ADV2"]),
+            )
+
+        # Main Phase 1 loop (line ~143) catches this as `was_different_store`
+        # and returns it; we also want the cache to be correct.
+        entry = discovery_cache.get("ADV2")
+        assert entry["store_ids"] == ["S1"]
+        # Result includes ADV2 once (no duplicates from backfill).
+        adv_ids = [r["advertiser_id"] for r in result]
+        assert adv_ids.count("ADV2") == 1
+
+    @pytest.mark.asyncio
+    async def test_per_advertiser_backfill_when_phase1_missed(
+        self, manager, discovery_cache
+    ):
+        """Phase 1 BC-wide call misses a store; per-advertiser store_list
+        finds it. Mirrors the real-world 7633354825347563521 case where the
+        BC-wide response from the chosen any_adv_id didn't include Home store.
+        """
+        # ADV_STALE was cached as gmvmax with empty store_ids (Phase 2 stuck).
+        discovery_cache.put(
+            "ADV_STALE", store_ids=[], ad_type="gmvmax", ad_name="Five Treasure"
+        )
+
+        # Phase 1's BC-wide call (using any_adv_id=ADV1) only returns S1.
+        bc_wide_resp = _make_store_list(
+            ("S1", "Store One", "ADV1", "Owner-1", "STATUS_ENABLE"),
+        )
+        # But ADV_STALE's own perspective shows it's exclusive on S_HOME.
+        per_adv_resp = _make_store_list(
+            ("S1", "Store One", "ADV1", "Owner-1", "STATUS_ENABLE"),
+            ("S_HOME", "Home", "ADV_STALE", "DFHDFAESFAS-Home", "STATUS_ENABLE"),
+        )
+
+        async def _mock_store_list(_client, adv_id, **_kw):
+            # First call: any_adv_id = ADV1 → BC-wide view (missing S_HOME).
+            # Second call: adv_id = ADV_STALE → finds S_HOME.
+            if adv_id == "ADV_STALE":
+                return per_adv_resp
+            return bc_wide_resp
+
+        with patch(
+            "tiktok_ads_mcp.tools.gmvmax_store_list.get_gmvmax_store_list",
+            new=AsyncMock(side_effect=_mock_store_list),
+        ):
+            result = await manager.discover_new_accounts(
+                known_store_ids={"S_HOME"},
+                authorized_accounts=_make_authorized(["ADV1", "ADV_STALE"]),
+            )
+
+        # ADV_STALE now correctly bound to S_HOME.
+        entry = discovery_cache.get("ADV_STALE")
+        assert entry["store_ids"] == ["S_HOME"]
+        assert entry["ad_name"] == "DFHDFAESFAS-Home"
+
+        # And it appears in result list since S_HOME is a known store.
+        adv_ids = {r["advertiser_id"] for r in result}
+        assert "ADV_STALE" in adv_ids
+
+    @pytest.mark.asyncio
+    async def test_backfill_skips_unknown_type(self, manager, discovery_cache):
+        """Cache entries with ad_type='unknown' are NOT touched by backfill
+        (only Phase 2's re-validation handles them)."""
+        discovery_cache.put("ADV_U", store_ids=[], ad_type="unknown")
+
+        store_resp = _make_store_list(
+            ("S1", "Store One", "ADV1", "Owner-1", "STATUS_ENABLE"),
+        )
+        with patch(
+            "tiktok_ads_mcp.tools.gmvmax_store_list.get_gmvmax_store_list",
+            new_callable=AsyncMock,
+            return_value=store_resp,
+        ) as mock_sl:
+            await manager.discover_new_accounts(
+                known_store_ids={"S1"},
+                authorized_accounts=_make_authorized(["ADV1", "ADV_U"]),
+            )
+
+        # ADV_U still unknown; backfill only operates on gmvmax type.
+        entry = discovery_cache.get("ADV_U")
+        assert entry["ad_type"] == "unknown"
+        # store_list called once for Phase 1; not called per-adv for ADV_U.
+        assert mock_sl.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_backfill_capped_by_batch_limit(self, manager, discovery_cache):
+        """When many stale entries exist, only _BACKFILL_BATCH_LIMIT get
+        per-advertiser calls per run; the rest carry over to next run."""
+        # Seed 15 stale gmvmax entries (limit is 10).
+        for i in range(15):
+            discovery_cache.put(f"STALE_{i}", store_ids=[], ad_type="gmvmax")
+
+        # BC-wide returns no overlap with stale ids.
+        bc_wide_resp = _make_store_list(
+            ("S1", "Owner-Store", "ADV_OWNER", "Owner", "STATUS_ENABLE"),
+        )
+
+        # All stale ids return a generic empty response from per-adv call.
+        empty_resp = {"store_list": []}
+
+        call_count = {"n": 0}
+
+        async def _mock_store_list(_client, adv_id, **_kw):
+            call_count["n"] += 1
+            if adv_id == "ADV_OWNER":
+                return bc_wide_resp
+            return empty_resp
+
+        with patch(
+            "tiktok_ads_mcp.tools.gmvmax_store_list.get_gmvmax_store_list",
+            new=AsyncMock(side_effect=_mock_store_list),
+        ):
+            await manager.discover_new_accounts(
+                known_store_ids={"S1"},
+                authorized_accounts=_make_authorized(["ADV_OWNER"]),
+            )
+
+        # 1 BC-wide call + 10 per-adv backfill calls = 11.
+        assert call_count["n"] == 1 + manager._BACKFILL_BATCH_LIMIT
