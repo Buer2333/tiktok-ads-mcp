@@ -354,12 +354,14 @@ async def get_gmvmax_reports_tool(
     filtering: Optional[Dict] = None,
     page: int = 1,
     page_size: int = 1000,
+    shop_tz: Optional[str] = None,
 ) -> str:
     """Get GMV Max performance reports via /gmv_max/report/get/.
     store_ids is REQUIRED (get from campaign info endpoint).
     Metrics: cost, orders, cost_per_order, gross_revenue, roi, net_cost, creative_delivery_status, product_impressions, product_clicks, product_click_rate, ad_click_rate, ad_conversion_rate, ad_video_view_rate_2s/6s/p25/p50/p75/p100.
     Dimensions: advertiser_id, stat_time_day, item_id (item_id requires filtering with campaign_ids AND item_group_ids).
-    Filtering: {"campaign_ids": ["..."], "item_group_ids": ["..."]}."""
+    Filtering: {"campaign_ids": ["..."], "item_group_ids": ["..."]}.
+    shop_tz: Optional shop timezone IANA name (e.g. "America/Los_Angeles"). When provided AND server env GMVMAX_ALIGNED_MODE!=off AND advertiser native tz differs from shop_tz, fetches hourly data and slices to shop-tz day window — fixes cross-tz advertiser (e.g. THB Bangkok) misalignment. Caller without shop_tz keeps legacy adv-tz interpretation."""
 
     client = get_tiktok_client()
     reports = await get_gmvmax_reports(
@@ -373,6 +375,7 @@ async def get_gmvmax_reports_tool(
         filtering=filtering,
         page=page,
         page_size=page_size,
+        shop_tz=shop_tz,
     )
 
     return json.dumps(

@@ -77,6 +77,328 @@ async def _fetch_hourly(
     )
 
 
+# Cap pagination defensively. With dimensions=[*user_dims, "stat_time_hour"]
+# worst-case row count for a single native date is items × 24h. AMSOLAR-class
+# advertisers (~250 items × 24h = ~6000 rows) need ~7 pages at page_size=1000;
+# 20-page ceiling gives 5× headroom before fail-fast.
+_MAX_HOURLY_PAGES = 20
+
+
+async def _fetch_hourly_by_dim(
+    client: TikTokAdsClient,
+    advertiser_id: str,
+    date_str: str,
+    store_ids: List[str],
+    dimensions: List[str],
+    metrics: List[str],
+    filtering: Optional[Dict] = None,
+    page_size: int = 1000,
+) -> List[Dict]:
+    """Fetch one native-date of GMVMAX data at hourly granularity, with arbitrary
+    extra dimensions (e.g. ``["campaign_id"]`` or ``["item_id"]``).
+
+    Appends ``stat_time_hour`` to `dimensions` so each returned row carries the
+    hour it landed in — needed downstream for shop-tz UTC slicing.
+
+    Paginates internally up to ``_MAX_HOURLY_PAGES``. With campaign/item × 24h
+    expansion, single-page (1000 rows) is sometimes insufficient for high-item
+    advertisers; pagination is therefore mandatory rather than caller-driven.
+
+    Mirrors ``_fetch_hourly`` error semantics: non-zero `code` raises so
+    ``@api_retry`` and ``TikTokIncompleteDataError`` flow stays intact.
+    """
+    full_dims = list(dimensions) + ["stat_time_hour"]
+    base_params = {
+        "advertiser_id": advertiser_id,
+        "start_date": date_str,
+        "end_date": date_str,
+        "dimensions": json.dumps(full_dims),
+        "metrics": json.dumps(metrics),
+        "store_ids": json.dumps(store_ids),
+        "page_size": page_size,
+    }
+    if filtering:
+        base_params["filtering"] = json.dumps(filtering)
+
+    all_rows: List[Dict] = []
+    for page in range(1, _MAX_HOURLY_PAGES + 1):
+        params = dict(base_params, page=page)
+        response = await client._make_request("GET", "gmv_max/report/get/", params)
+        if response.get("code") != 0:
+            raise Exception(
+                f"gmv_max/report/get/ (hourly_by_dim) returned "
+                f"code={response.get('code')} msg={response.get('message')!r} "
+                f"for advertiser={advertiser_id} date={date_str} page={page}"
+            )
+        data = response.get("data", {})
+        rows = data.get("list", []) or []
+        all_rows.extend(rows)
+
+        page_info = data.get("page_info", {}) or {}
+        total_page = int(page_info.get("total_page", page) or page)
+        if page >= total_page or not rows:
+            break
+    else:
+        # Hit the safety cap. Surface explicitly so operators see a truncated
+        # response in logs rather than silently dropping rows.
+        raise Exception(
+            f"gmv_max/report/get/ (hourly_by_dim) exceeded _MAX_HOURLY_PAGES="
+            f"{_MAX_HOURLY_PAGES} for advertiser={advertiser_id} date={date_str} "
+            f"dims={full_dims} — investigate row explosion"
+        )
+
+    return all_rows
+
+
+def _aggregate_by_dims(
+    rows: List[Dict],
+    dimensions: List[str],
+    metrics: List[str],
+    start_utc: datetime,
+    end_utc: datetime,
+    ad_zone,
+    now_utc: datetime,
+) -> tuple:
+    """Filter `rows` (hourly granular) to the shop-tz UTC window then aggregate
+    by tuple(`dimensions`).
+
+    Group key = tuple of dim values (in `dimensions` order, excluding
+    ``stat_time_hour`` which only exists to enable UTC slicing). Numeric metric
+    values are summed across hours within the window.
+
+    Returns ``(aggregated_rows, last_row_utc, hours_included)``:
+      - ``aggregated_rows``: list of ``{"dimensions": {...}, "metrics": {...}}``
+        matching the per-row shape of ``get_gmvmax_reports``. Metric values are
+        stringified to match upstream serialization.
+      - ``last_row_utc``: latest UTC datetime accepted into the aggregate (for
+        completeness lag check downstream); ``None`` if no rows accepted.
+      - ``hours_included``: count of hourly rows that landed in the window.
+
+    Limitation: sums all metric values as floats. Additive metrics (cost,
+    gross_revenue, orders, net_cost, *_impressions, *_clicks) sum correctly.
+    Ratio metrics (roi, cost_per_order, *_rate) cannot be meaningfully summed
+    — callers must recompute from base metrics post-aggregation.
+    """
+    # Per-group aggregator and dim-dict snapshot for round-trip
+    aggregated: Dict[tuple, Dict[str, float]] = {}
+    dim_snapshots: Dict[tuple, Dict[str, Any]] = {}
+    last_row_utc: Optional[datetime] = None
+    hours_included = 0
+
+    for row in rows:
+        row_dims = row.get("dimensions", {})
+        hour_str = row_dims.get("stat_time_hour", "")
+        # TikTok occasionally returns "-" placeholder for hours with no data
+        # (2026-05-12 regression: strptime raised → @api_retry burned 4min).
+        if not hour_str or hour_str == "-":
+            continue
+
+        utc_dt = hour_to_utc(hour_str, ad_zone)
+
+        # Window check: within shop-tz UTC day AND not future-hour
+        if not (start_utc <= utc_dt < end_utc and utc_dt <= now_utc):
+            continue
+
+        key = tuple(row_dims.get(d, "") for d in dimensions)
+        if key not in aggregated:
+            aggregated[key] = {m: 0.0 for m in metrics}
+            dim_snapshots[key] = {d: row_dims.get(d, "") for d in dimensions}
+
+        row_metrics = row.get("metrics", {})
+        for m in metrics:
+            val = row_metrics.get(m, "0")
+            if val in (None, ""):
+                continue
+            try:
+                aggregated[key][m] += float(val)
+            except (ValueError, TypeError):
+                # Non-numeric (e.g. creative_delivery_status) — skip silently
+                # so the group still aggregates the numeric metrics it can.
+                pass
+
+        hours_included += 1
+        if last_row_utc is None or utc_dt > last_row_utc:
+            last_row_utc = utc_dt
+
+    # Build output rows. Stringify metric values for shape parity with the
+    # non-aligned `get_gmvmax_reports` path (callers parse with `float(...)`).
+    out: List[Dict] = []
+    for key, agg_metrics in aggregated.items():
+        out.append(
+            {
+                "dimensions": dim_snapshots[key],
+                "metrics": {m: str(round(v, 4)) for m, v in agg_metrics.items()},
+            }
+        )
+
+    return out, last_row_utc, hours_included
+
+
+@api_retry(
+    max_attempts=3,
+    min_wait=3,
+    max_wait=15,
+    retryable_exceptions=(TikTokRateLimitError, TikTokIncompleteDataError),
+)
+async def get_gmvmax_reports_aligned(
+    client: TikTokAdsClient,
+    advertiser_id: str,
+    start_date: str,
+    end_date: str,
+    store_ids: List[str],
+    dimensions: List[str],
+    metrics: List[str],
+    shop_tz: str,
+    filtering: Optional[Dict] = None,
+    page_size: int = 1000,
+) -> Dict[str, Any]:
+    """Shop-tz-aligned variant of ``get_gmvmax_reports`` for arbitrary dimensions
+    (``campaign_id`` / ``item_id``).
+
+    Solves the bug where TikTok's ``/gmv_max/report/get/`` interprets
+    ``start_date``/``end_date`` in **advertiser_tz**, causing a window
+    misalignment for cross-tz advertisers (e.g. THB Bangkok adv vs PT shop —
+    PT-evening spend leaks into adv's next-day bucket).
+
+    Mechanism:
+      1. Resolve advertiser native TZ via cached ``/advertiser/info/``.
+      2. For each shop-tz day in ``[start_date, end_date]``: compute the 1-2
+         advertiser-tz native dates that overlap, fetch hourly rows
+         (``stat_time_hour`` dimension) for each in parallel.
+      3. Slice rows to the shop-tz day's UTC window via ``hour_to_utc``.
+      4. Aggregate by ``tuple(dimensions)`` (drop ``stat_time_hour``).
+      5. FX-convert monetary metrics via shared ``_apply_fx_to_rows``.
+
+    Returns the exact same dict shape as ``get_gmvmax_reports`` so wrappers
+    in ``core/tiktok_api_mcp.py`` and downstream callers stay unchanged.
+
+    Args:
+      client: TikTok API client
+      advertiser_id: advertiser to query
+      start_date, end_date: shop-timezone date range (YYYY-MM-DD, inclusive)
+      store_ids: TikTok Shop store IDs
+      dimensions: dims to aggregate by (NOT including stat_time_hour, which
+                  is appended internally for slicing then dropped)
+      metrics: numeric metric names to sum across hours
+      shop_tz: shop timezone (IANA name) — used for UTC-window slicing
+      filtering: optional dict with campaign_ids / item_group_ids
+      page_size: per-page row cap for hourly fetch (default 1000)
+
+    Raises:
+      TikTokIncompleteDataError: hourly endpoint truncated mid-window (caught
+        by ``@api_retry`` so transient lag self-heals).
+    """
+    # Lazy import to avoid circular dep between gmvmax_reports and aligned modules
+    from .gmvmax_reports import _apply_fx_to_rows
+
+    shop_zone = parse_tz(shop_tz)
+    ad_zone = await _get_ad_tz(client, advertiser_id)
+    now_utc = datetime.now(timezone.utc)
+
+    # Walk each shop-tz day in the range. For single-day queries (the common
+    # case for morning_brief / material_report) this loop runs once.
+    start_d = datetime.strptime(start_date, "%Y-%m-%d").date()
+    end_d = datetime.strptime(end_date, "%Y-%m-%d").date()
+    if end_d < start_d:
+        raise ValueError(f"end_date {end_date} < start_date {start_date}")
+
+    import asyncio as _asyncio
+
+    all_aggregated: List[Dict] = []
+    last_row_utc_overall: Optional[datetime] = None
+    total_cost_for_completeness = 0.0
+
+    current = start_d
+    while current <= end_d:
+        d_str = current.strftime("%Y-%m-%d")
+        start_utc, end_utc = day_utc_range(d_str, shop_zone)
+        native_dates = native_dates_for_day(d_str, shop_zone, ad_zone)
+
+        # Fetch all native_dates concurrently (1-2 fetches typical; client
+        # Semaphore(5) caps actual concurrency under existing rate budget).
+        fetched_per_native = await _asyncio.gather(
+            *(
+                _fetch_hourly_by_dim(
+                    client,
+                    advertiser_id,
+                    nd,
+                    store_ids,
+                    dimensions,
+                    metrics,
+                    filtering=filtering,
+                    page_size=page_size,
+                )
+                for nd in native_dates
+            )
+        )
+        merged_rows: List[Dict] = []
+        for rows in fetched_per_native:
+            merged_rows.extend(rows)
+
+        day_agg, day_last_utc, _ = _aggregate_by_dims(
+            merged_rows,
+            dimensions,
+            metrics,
+            start_utc,
+            end_utc,
+            ad_zone,
+            now_utc,
+        )
+        all_aggregated.extend(day_agg)
+        if day_last_utc is not None and (
+            last_row_utc_overall is None or day_last_utc > last_row_utc_overall
+        ):
+            last_row_utc_overall = day_last_utc
+        for r in day_agg:
+            try:
+                total_cost_for_completeness += float(r["metrics"].get("cost", 0) or 0)
+            except (ValueError, TypeError):
+                pass
+
+        current += timedelta(days=1)
+
+    # Completeness check: same logic as get_gmvmax_report_aligned but anchored
+    # to the last shop-tz day in the range. Rate-limit truncation manifests as
+    # the hourly endpoint stopping mid-window; raising
+    # `TikTokIncompleteDataError` triggers @api_retry above.
+    if total_cost_for_completeness > 0 and last_row_utc_overall is not None:
+        last_day_end_utc = day_utc_range(end_date, shop_zone)[1]
+        last_full_hour = (now_utc - timedelta(hours=1)).replace(
+            minute=0, second=0, microsecond=0
+        )
+        expected_last = min(last_full_hour, last_day_end_utc - timedelta(hours=1))
+        lag_h = (expected_last - last_row_utc_overall).total_seconds() / 3600
+        if lag_h > _HOURS_LAG_TOLERANCE:
+            raise TikTokIncompleteDataError(
+                f"GMVMAX-aligned advertiser={advertiser_id} "
+                f"dates={start_date}~{end_date} stores={store_ids} dims={dimensions}: "
+                f"latest_row={last_row_utc_overall.strftime('%Y-%m-%d %H:%M UTC')} "
+                f"lags {lag_h:.1f}h behind expected="
+                f"{expected_last.strftime('%Y-%m-%d %H:%M UTC')} "
+                f"(tol={_HOURS_LAG_TOLERANCE}, cost=${total_cost_for_completeness:.2f}) — "
+                f"likely token rate-limit truncated mid-window"
+            )
+
+    # FX: convert monetary metric values via the shared helper used by the
+    # non-aligned path. Stays in lockstep with non-aligned FX semantics
+    # (per-row by stat_time_day when present; else fallback to end_date rate).
+    converted_rows, source_currency = await _apply_fx_to_rows(
+        client, advertiser_id, all_aggregated, fallback_date=end_date
+    )
+
+    return {
+        "page_info": {
+            "total_number": len(converted_rows),
+            "total_page": 1,
+            "page": 1,
+            "page_size": page_size,
+        },
+        "list": converted_rows,
+        "currency": "USD",
+        "source_currency": source_currency,
+    }
+
+
 @api_retry(
     max_attempts=3,
     min_wait=3,
