@@ -362,7 +362,49 @@ async def get_gmvmax_reports(
             )
 
         # Lazy import to avoid module-load cycle (aligned imports from us)
-        from .gmvmax_report_aligned import get_gmvmax_reports_aligned
+        from .gmvmax_report_aligned import (
+            _vid_prorate_aligned,
+            get_gmvmax_reports_aligned,
+        )
+
+        # Pick aligned variant by dimensions:
+        # - item_id  → _vid_prorate_aligned (campaign-hourly + vid-daily proration,
+        #              works around TikTok limit "item_id incompatible with stat_time_hour")
+        # - others   → get_gmvmax_reports_aligned (direct hourly+slice; campaign-id OK)
+        item_level = "item_id" in dimensions
+
+        async def _call_aligned():
+            if item_level:
+                # _vid_prorate_aligned requires campaign_ids in filtering. If
+                # caller is item-level without campaign filter, that's a usage
+                # error — the proration math has no anchor.
+                if not filtering or not filtering.get("campaign_ids"):
+                    raise ValueError(
+                        "item_id aligned path requires filtering.campaign_ids"
+                    )
+                return await _vid_prorate_aligned(
+                    client,
+                    advertiser_id,
+                    start_date,
+                    end_date,
+                    store_ids or [],
+                    metrics,
+                    shop_tz=shop_tz,
+                    filtering=filtering,
+                    page_size=page_size,
+                )
+            return await get_gmvmax_reports_aligned(
+                client,
+                advertiser_id,
+                start_date,
+                end_date,
+                store_ids or [],
+                dimensions,
+                metrics,
+                shop_tz=shop_tz,
+                filtering=filtering,
+                page_size=page_size,
+            )
 
         if mode == _ALIGNED_SHADOW:
             original = await _get_gmvmax_reports_original(
@@ -378,18 +420,7 @@ async def get_gmvmax_reports(
                 page_size=page_size,
             )
             try:
-                aligned = await get_gmvmax_reports_aligned(
-                    client,
-                    advertiser_id,
-                    start_date,
-                    end_date,
-                    store_ids or [],
-                    dimensions,
-                    metrics,
-                    shop_tz=shop_tz,
-                    filtering=filtering,
-                    page_size=page_size,
-                )
+                aligned = await _call_aligned()
                 _log_shadow_diff(
                     advertiser_id,
                     start_date,
@@ -407,18 +438,7 @@ async def get_gmvmax_reports(
 
         # mode == "on"
         try:
-            return await get_gmvmax_reports_aligned(
-                client,
-                advertiser_id,
-                start_date,
-                end_date,
-                store_ids or [],
-                dimensions,
-                metrics,
-                shop_tz=shop_tz,
-                filtering=filtering,
-                page_size=page_size,
-            )
+            return await _call_aligned()
         except Exception as e:  # noqa: BLE001 — fail-soft: never break morning_brief
             logger.error(
                 f"[aligned] adv={advertiser_id[-6:]} aligned-path failed, "

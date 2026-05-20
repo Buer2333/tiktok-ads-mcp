@@ -1001,3 +1001,280 @@ async def test_dispatcher_on_falls_back_on_aligned_exception(
 
     # Result is original-path success despite aligned failures
     assert float(result["list"][0]["metrics"]["cost"]) == 50.0
+
+
+# ─── _vid_prorate_aligned (Solution H) ───────────────────────────────────
+#
+# Real-world baseline: AMSOLAR 0424539 (THB advertiser, Bangkok UTC+7) on
+# Hiileathy NAD+ store (PT shop) for PT 2026-05-19. Hardcoded values come
+# from live TikTok API queries documented in the planning conversation; they
+# are the "truth" we want the proration math to reproduce. See the plan file
+# at /Users/shining/.claude/plans/dynamic-spinning-seahorse.md.
+#
+# PT 5-19 UTC window = [UTC 5-19 07:00, UTC 5-20 07:00)
+# Covered by BKK 5-19 14:00-23:00 (10h) + BKK 5-20 00:00-13:00 (14h)
+
+
+# Pinned campaign-hourly USD-converted truth for campaign 1865181863053394.
+# Values are post-FX (THB×0.030 ≈ USD), so the proration test can use them
+# directly without additional FX gymnastics — the helper applies FX once
+# to the prorated rows, and our fixture pretends the raw API already returns
+# USD-magnitude amounts (we patch _fetch_from_frankfurter to rate=1.0).
+LILLIAN_CAMPAIGN = "1865181863053394"
+LILLIAN_VID = "7641536365347228959"
+
+# BKK 5-19 hourly (24 entries; values match live API capture)
+_BKK_5_19_HOURLY = {
+    "00:00:00": (12.0872, 40.0164, 1),
+    "01:00:00": (17.1928, 0.0, 0),
+    "02:00:00": (1.6832, 29.9999, 1),
+    "03:00:00": (2.8397, 0.0, 0),
+    "04:00:00": (2.9331, 0.0, 0),
+    "05:00:00": (3.3186, 0.0, 0),
+    "06:00:00": (5.39, 29.9999, 1),
+    "07:00:00": (6.0879, 0.0, 0),
+    "08:00:00": (12.1044, 0.0, 0),
+    "09:00:00": (5.4246, 0.0, 0),
+    "10:00:00": (2.1648, 0.0, 0),
+    "11:00:00": (1.1954, 30.0367, 1),
+    "12:00:00": (0.8356, 0.0, 0),
+    "13:00:00": (1.0993, 0.0, 0),
+    "14:00:00": (0.6537, 0.0, 0),
+    "15:00:00": (0.564, 0.0, 0),
+    "16:00:00": (1.1783, 0.0, 0),
+    "17:00:00": (0.6589, 0.0, 0),
+    "18:00:00": (2.2377, 0.0, 0),
+    "19:00:00": (1.3574, 30.0367, 1),
+    "20:00:00": (4.7538, 0.0, 0),
+    "21:00:00": (10.5866, 0.0, 0),
+    "22:00:00": (20.0264, 40.0654, 1),
+    "23:00:00": (19.1972, 0.0, 0),
+}
+
+# BKK 5-20 hourly (24 entries)
+_BKK_5_20_HOURLY = {
+    "00:00:00": (20.0301, 40.0654, 1),
+    "01:00:00": (20.6838, 110.1674, 3),
+    "02:00:00": (21.6021, 100.1384, 3),
+    "03:00:00": (31.2428, 90.1098, 3),
+    "04:00:00": (39.2205, 0.0, 0),
+    "05:00:00": (33.6348, 70.102, 2),
+    "06:00:00": (34.3737, 90.1098, 3),
+    "07:00:00": (15.8896, 0.0, 0),
+    "08:00:00": (30.97, 69.6734, 2),
+    "09:00:00": (20.3972, 69.6734, 2),
+    "10:00:00": (0.4945, 0.0, 0),
+    "11:00:00": (0.0, 0.0, 0),
+    "12:00:00": (0.0, 0.0, 0),
+    "13:00:00": (0.0, 0.0, 0),
+    "14:00:00": (0.0, 0.0, 0),
+    "15:00:00": (0.0, 0.0, 0),
+    "16:00:00": (0.0, 0.0, 0),
+    "17:00:00": (0.0, 0.0, 0),
+    "18:00:00": (0.0, 0.0, 0),
+    "19:00:00": (0.0, 0.0, 0),
+    "20:00:00": (0.0, 0.0, 0),
+    "21:00:00": (0.0, 0.0, 0),
+    "22:00:00": (0.0, 0.0, 0),
+    "23:00:00": (0.0, 0.0, 0),
+}
+
+
+def _camp_hourly_rows(day_iso: str, hours_dict: dict) -> list:
+    """Build campaign-hourly mock rows in the shape get_gmvmax_reports returns."""
+    rows = []
+    for h, (c, g, o) in hours_dict.items():
+        rows.append(
+            {
+                "dimensions": {
+                    "campaign_id": LILLIAN_CAMPAIGN,
+                    "stat_time_hour": f"{day_iso} {h}",
+                },
+                "metrics": {
+                    "cost": str(c),
+                    "gross_revenue": str(g),
+                    "orders": str(o),
+                },
+            }
+        )
+    return rows
+
+
+# Vid 2-day totals at item_id level (live API capture):
+# - BKK 5-19 vid total: cost=$23.5, gmv=$69.81, orders=2
+# - BKK 5-20 vid total (within campaign + item_group): cost=$197.60, gmv=$417.99, orders=13
+_VID_5_19_DAILY = {"cost": 23.5, "gross_revenue": 69.81, "orders": 2}
+_VID_5_20_DAILY = {"cost": 197.6, "gross_revenue": 417.99, "orders": 13}
+
+
+def _vid_daily_response(vid_metrics: dict) -> dict:
+    """One-page response shape from get_gmvmax_reports for a single vid."""
+    return {
+        "code": 0,
+        "data": {
+            "list": [
+                {
+                    "dimensions": {"item_id": LILLIAN_VID},
+                    "metrics": {
+                        "cost": str(vid_metrics["cost"]),
+                        "gross_revenue": str(vid_metrics["gross_revenue"]),
+                        "orders": str(vid_metrics["orders"]),
+                    },
+                }
+            ],
+            "page_info": {"total_page": 1, "total_number": 1},
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_lillian_vid_prorate_matches_baseline(
+    mock_client, clear_caches, relax_completeness
+):
+    """End-to-end Solution H validation against PT 2026-05-19 baseline:
+
+    Expected per-vid proration math (computed by hand from real API capture):
+      camp_pt_5_19   = (cost=$329.75, gmv=$710.14, orders=21)
+      camp_2day_advtz = (cost=$404.11, gmv=$839.77, orders=25)
+      vid_2day_advtz  = (cost=$221.10, gmv=$487.80, orders=15)
+      vid_pt_aligned  = camp_pt × (vid_2day / camp_2day)
+                      ≈ cost=$180.40, gmv=$412.46, orders=12.6
+
+    Tolerance: 1% absolute on the rounded values (we control the fixture, so
+    tighter than the ~5-15% real-world spread).
+    """
+    from tiktok_ads_mcp import currency_cache as _ccm
+    from tiktok_ads_mcp import fx as _fxm
+    from tiktok_ads_mcp.tools.gmvmax_report_aligned import _vid_prorate_aligned
+    from tiktok_ads_mcp.tz_cache import _tz_cache
+    from unittest.mock import patch
+
+    # Pretend AMSOLAR's tz is Bangkok and currency is THB-but-rate-1.0 (so the
+    # fixture numbers are already USD-magnitude).
+    _tz_cache["amsolar"] = ZoneInfo("Asia/Bangkok")
+    _ccm._currency_cache["amsolar"] = "THB"
+
+    # Call sequence within one shop-tz day:
+    #   1. campaign-hourly fetch on BKK 5-19 (asyncio.gather pos 0)
+    #   2. campaign-hourly fetch on BKK 5-20 (gather pos 1)
+    #   3. vid-daily fetch on BKK 5-19 (per-campaign loop, gather pos 0)
+    #   4. vid-daily fetch on BKK 5-20 (gather pos 1)
+    mock_client._make_request.side_effect = [
+        # Campaign-hourly responses
+        {
+            "code": 0,
+            "data": {
+                "list": _camp_hourly_rows("2026-05-19", _BKK_5_19_HOURLY),
+                "page_info": {"total_page": 1, "total_number": 24},
+            },
+        },
+        {
+            "code": 0,
+            "data": {
+                "list": _camp_hourly_rows("2026-05-20", _BKK_5_20_HOURLY),
+                "page_info": {"total_page": 1, "total_number": 24},
+            },
+        },
+        # Vid-daily responses (one per native_date for the single campaign)
+        _vid_daily_response(_VID_5_19_DAILY),
+        _vid_daily_response(_VID_5_20_DAILY),
+    ]
+
+    # FX rate=1.0 → fixture numbers stay magnitude-equal post-conversion
+    with patch.object(_fxm, "_fetch_from_frankfurter", AsyncMock(return_value=1.0)):
+        with patch("tiktok_ads_mcp.tools.gmvmax_report_aligned.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 5, 20, 14, 0, tzinfo=timezone.utc)
+            mock_dt.strptime = datetime.strptime
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+
+            result = await _vid_prorate_aligned(
+                mock_client,
+                "amsolar",
+                "2026-05-19",
+                "2026-05-19",
+                store_ids=["7495609170861329178"],
+                metrics=["cost", "gross_revenue", "orders"],
+                shop_tz="America/Los_Angeles",
+                filtering={
+                    "campaign_ids": [LILLIAN_CAMPAIGN],
+                    "item_group_ids": ["1731864028716962586"],
+                },
+            )
+
+    # Shape parity
+    assert result["currency"] == "USD"
+    assert result["source_currency"] == "THB"
+    assert "page_info" in result and "list" in result
+    assert len(result["list"]) == 1
+    row = result["list"][0]
+    assert row["dimensions"]["item_id"] == LILLIAN_VID
+
+    # Numeric expectations (hand-computed, see docstring above)
+    cost_actual = float(row["metrics"]["cost"])
+    gmv_actual = float(row["metrics"]["gross_revenue"])
+    orders_actual = float(row["metrics"]["orders"])
+
+    EXPECTED_COST = 180.40
+    EXPECTED_GMV = 412.46
+    EXPECTED_ORDERS = 12.6
+
+    # Allow 1% tolerance — proration math is deterministic, fixture is pinned
+    assert abs(cost_actual - EXPECTED_COST) / EXPECTED_COST < 0.01, (
+        f"cost={cost_actual:.2f} vs expected={EXPECTED_COST:.2f}"
+    )
+    assert abs(gmv_actual - EXPECTED_GMV) / EXPECTED_GMV < 0.01, (
+        f"gmv={gmv_actual:.2f} vs expected={EXPECTED_GMV:.2f}"
+    )
+    assert abs(orders_actual - EXPECTED_ORDERS) / EXPECTED_ORDERS < 0.01, (
+        f"orders={orders_actual:.2f} vs expected={EXPECTED_ORDERS:.2f}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_vid_prorate_requires_campaign_filter(mock_client, clear_caches):
+    """_vid_prorate_aligned must raise when filtering.campaign_ids absent."""
+    from tiktok_ads_mcp import currency_cache as _ccm
+    from tiktok_ads_mcp.tools.gmvmax_report_aligned import _vid_prorate_aligned
+    from tiktok_ads_mcp.tz_cache import _tz_cache
+
+    _tz_cache["amsolar"] = ZoneInfo("Asia/Bangkok")
+    _ccm._currency_cache["amsolar"] = "THB"
+
+    with pytest.raises(ValueError, match="requires filtering.campaign_ids"):
+        await _vid_prorate_aligned(
+            mock_client,
+            "amsolar",
+            "2026-05-19",
+            "2026-05-19",
+            store_ids=["s1"],
+            metrics=["cost", "gross_revenue", "orders"],
+            shop_tz="America/Los_Angeles",
+            filtering={},  # missing campaign_ids
+        )
+
+
+@pytest.mark.asyncio
+async def test_vid_prorate_drops_non_additive_metrics(
+    mock_client, clear_caches, relax_completeness
+):
+    """Ratio/rate metrics (roi, cost_per_order, *_rate) can't be summed and
+    must be filtered out before fetch — verify the helper raises when ALL
+    supplied metrics are non-additive."""
+    from tiktok_ads_mcp import currency_cache as _ccm
+    from tiktok_ads_mcp.tools.gmvmax_report_aligned import _vid_prorate_aligned
+    from tiktok_ads_mcp.tz_cache import _tz_cache
+
+    _tz_cache["amsolar"] = ZoneInfo("Asia/Bangkok")
+    _ccm._currency_cache["amsolar"] = "THB"
+
+    with pytest.raises(ValueError, match="no additive metrics"):
+        await _vid_prorate_aligned(
+            mock_client,
+            "amsolar",
+            "2026-05-19",
+            "2026-05-19",
+            store_ids=["s1"],
+            metrics=["roi", "cost_per_order", "ad_click_rate"],
+            shop_tz="America/Los_Angeles",
+            filtering={"campaign_ids": ["c1"]},
+        )

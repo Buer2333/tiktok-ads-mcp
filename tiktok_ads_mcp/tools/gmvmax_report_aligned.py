@@ -399,6 +399,373 @@ async def get_gmvmax_reports_aligned(
     }
 
 
+# Non-additive metrics that must NOT be summed across hours/days during proration.
+# These ratio/rate metrics are dropped from the prorated output — callers can
+# recompute them from the additive base metrics if needed.
+_NON_ADDITIVE_METRICS = {
+    "roi",
+    "cost_per_order",
+    "ad_click_rate",
+    "ad_conversion_rate",
+    "product_click_rate",
+    "ad_video_view_rate_2s",
+    "ad_video_view_rate_6s",
+    "ad_video_view_rate_p25",
+    "ad_video_view_rate_p50",
+    "ad_video_view_rate_p75",
+    "ad_video_view_rate_p100",
+    "creative_delivery_status",
+}
+
+
+async def _fetch_vid_daily(
+    client: TikTokAdsClient,
+    advertiser_id: str,
+    date_str: str,
+    store_ids: List[str],
+    campaign_ids: List[str],
+    item_group_ids: List[str],
+    metrics: List[str],
+    page_size: int = 1000,
+) -> List[Dict]:
+    """Fetch one native-date of GMVMAX item-level rows (no time dimension).
+
+    TikTok API rejects ``stat_time_hour`` paired with ``item_id`` — items only
+    expose day-resolution. This helper fetches per-vid daily totals for one
+    advertiser-tz date, scoped to a single campaign + its item_groups so the
+    response is small enough to fit one page in nearly all cases.
+
+    Paginates defensively up to ``_MAX_HOURLY_PAGES`` for the rare wide query.
+    """
+    base_params = {
+        "advertiser_id": advertiser_id,
+        "start_date": date_str,
+        "end_date": date_str,
+        "dimensions": json.dumps(["item_id"]),
+        "metrics": json.dumps(metrics),
+        "store_ids": json.dumps(store_ids),
+        "page_size": page_size,
+    }
+    flt: Dict[str, Any] = {"campaign_ids": campaign_ids}
+    if item_group_ids:
+        flt["item_group_ids"] = item_group_ids
+    base_params["filtering"] = json.dumps(flt)
+
+    all_rows: List[Dict] = []
+    for page in range(1, _MAX_HOURLY_PAGES + 1):
+        params = dict(base_params, page=page)
+        response = await client._make_request("GET", "gmv_max/report/get/", params)
+        if response.get("code") != 0:
+            raise Exception(
+                f"gmv_max/report/get/ (vid_daily) returned "
+                f"code={response.get('code')} msg={response.get('message')!r} "
+                f"for advertiser={advertiser_id} date={date_str} page={page}"
+            )
+        data = response.get("data", {})
+        rows = data.get("list", []) or []
+        all_rows.extend(rows)
+
+        page_info = data.get("page_info", {}) or {}
+        total_page = int(page_info.get("total_page", page) or page)
+        if page >= total_page or not rows:
+            break
+    else:
+        raise Exception(
+            f"gmv_max/report/get/ (vid_daily) exceeded _MAX_HOURLY_PAGES="
+            f"{_MAX_HOURLY_PAGES} for advertiser={advertiser_id} date={date_str} "
+            f"campaign_ids={campaign_ids}"
+        )
+
+    return all_rows
+
+
+def _camp_2day_totals(
+    hourly_rows: List[Dict], metrics: List[str]
+) -> Dict[str, Dict[str, float]]:
+    """Aggregate ``[campaign_id, stat_time_hour]`` rows by campaign_id only
+    (ignore the hour dim, sum all hours across all native dates).
+
+    Used as proration denominator: the campaign's total spend over the same
+    multi-native-day window we'll query at vid-daily resolution.
+    """
+    out: Dict[str, Dict[str, float]] = {}
+    for row in hourly_rows:
+        dims = row.get("dimensions", {})
+        hour_str = dims.get("stat_time_hour", "")
+        if not hour_str or hour_str == "-":
+            continue
+        cid = str(dims.get("campaign_id", ""))
+        if not cid:
+            continue
+        if cid not in out:
+            out[cid] = {m: 0.0 for m in metrics}
+        for m in metrics:
+            try:
+                out[cid][m] += float(row.get("metrics", {}).get(m, 0) or 0)
+            except (ValueError, TypeError):
+                pass
+    return out
+
+
+@api_retry(
+    max_attempts=3,
+    min_wait=3,
+    max_wait=15,
+    retryable_exceptions=(TikTokRateLimitError, TikTokIncompleteDataError),
+)
+async def _vid_prorate_aligned(
+    client: TikTokAdsClient,
+    advertiser_id: str,
+    start_date: str,
+    end_date: str,
+    store_ids: List[str],
+    metrics: List[str],
+    shop_tz: str,
+    filtering: Dict,
+    page_size: int = 1000,
+) -> Dict[str, Any]:
+    """Vid-level shop-tz aligned report via campaign-hourly proration.
+
+    TikTok API limitation: ``item_id`` dimension is NOT compatible with
+    ``stat_time_hour`` (returns "Invalid dimension(s): [stat_time_hour]"),
+    and ``stat_time_hour`` in *filtering* is silently ignored. So vid-level
+    data only exists at day resolution.
+
+    Workaround: campaign-hourly aligned gives us the truthful PT-window
+    campaign total; vid-daily over the 2 adv-tz dates that span the PT
+    window gives the vid's proportional share within each campaign. We
+    redistribute the PT-aligned campaign total across vids using the
+    daily proportion as a stable approximation:
+
+        vid_pt_metric = camp_pt_metric × (vid_2day_metric / camp_2day_metric)
+
+    Accuracy: ~93% for vids sharing identity / audience profile within a
+    campaign; degrades when a vid's hourly distribution sharply differs
+    from the campaign average. Errors bounded by intra-campaign variance.
+
+    Args:
+      filtering: MUST include "campaign_ids". May include "item_group_ids".
+
+    Returns dict shape-compatible with ``get_gmvmax_reports`` (list of
+    ``{dimensions: {item_id}, metrics: {...}}``).
+    """
+    if (
+        not filtering
+        or "campaign_ids" not in filtering
+        or not filtering["campaign_ids"]
+    ):
+        raise ValueError(
+            "_vid_prorate_aligned requires filtering.campaign_ids (vid queries "
+            "must be scoped to specific campaigns)"
+        )
+
+    # Lazy import to avoid circular dep with gmvmax_reports.py
+    from .gmvmax_reports import _apply_fx_to_rows
+
+    shop_zone = parse_tz(shop_tz)
+    ad_zone = await _get_ad_tz(client, advertiser_id)
+    now_utc = datetime.now(timezone.utc)
+
+    # Drop non-additive metrics — they cannot be meaningfully prorated
+    additive_metrics = [m for m in metrics if m not in _NON_ADDITIVE_METRICS]
+    if not additive_metrics:
+        raise ValueError(
+            f"_vid_prorate_aligned: no additive metrics in {metrics}. "
+            f"Caller must request at least one of cost / gross_revenue / orders / etc."
+        )
+
+    campaign_ids: List[str] = list(filtering["campaign_ids"])
+    item_group_ids: List[str] = list(filtering.get("item_group_ids") or [])
+
+    # Walk shop-tz dates in the range (typically single-day for morning_brief).
+    start_d = datetime.strptime(start_date, "%Y-%m-%d").date()
+    end_d = datetime.strptime(end_date, "%Y-%m-%d").date()
+    if end_d < start_d:
+        raise ValueError(f"end_date {end_date} < start_date {start_date}")
+
+    import asyncio as _asyncio
+
+    # Accumulator: aggregate prorated vid metrics across all shop-tz dates in
+    # the range. For single-day queries this just gathers one day's output.
+    prorated_by_vid: Dict[str, Dict[str, float]] = {}
+    last_row_utc_overall: Optional[datetime] = None
+    total_cost_for_completeness = 0.0
+
+    current = start_d
+    while current <= end_d:
+        d_str = current.strftime("%Y-%m-%d")
+        start_utc, end_utc = day_utc_range(d_str, shop_zone)
+        native_dates = native_dates_for_day(d_str, shop_zone, ad_zone)
+
+        # ── Phase 1: campaign-hourly across native_dates ────────────────
+        camp_hourly_fetched = await _asyncio.gather(
+            *(
+                _fetch_hourly_by_dim(
+                    client,
+                    advertiser_id,
+                    nd,
+                    store_ids,
+                    dimensions=["campaign_id"],
+                    metrics=additive_metrics,
+                    filtering={"campaign_ids": campaign_ids},
+                    page_size=page_size,
+                )
+                for nd in native_dates
+            )
+        )
+        camp_hourly_rows: List[Dict] = []
+        for rows in camp_hourly_fetched:
+            camp_hourly_rows.extend(rows)
+
+        # Aggregate by campaign_id over PT-window (UTC slice) → camp_pt_totals
+        camp_pt_rows, day_last_utc, _ = _aggregate_by_dims(
+            camp_hourly_rows,
+            ["campaign_id"],
+            additive_metrics,
+            start_utc,
+            end_utc,
+            ad_zone,
+            now_utc,
+        )
+        camp_pt_by_cid: Dict[str, Dict[str, float]] = {}
+        for r in camp_pt_rows:
+            cid = str(r["dimensions"].get("campaign_id", ""))
+            m_str = r["metrics"]
+            camp_pt_by_cid[cid] = {
+                m: float(m_str.get(m, 0) or 0) for m in additive_metrics
+            }
+
+        # Aggregate by campaign_id over the FULL 2-native-day window (no UTC
+        # slice) → camp_2day_totals (proration denominator).
+        camp_2day = _camp_2day_totals(camp_hourly_rows, additive_metrics)
+
+        # Track completeness against the last native date observed (mirrors the
+        # existing aligned path's lag detection).
+        if day_last_utc is not None and (
+            last_row_utc_overall is None or day_last_utc > last_row_utc_overall
+        ):
+            last_row_utc_overall = day_last_utc
+        for cid_metrics in camp_pt_by_cid.values():
+            try:
+                total_cost_for_completeness += float(cid_metrics.get("cost", 0) or 0)
+            except (ValueError, TypeError):
+                pass
+
+        # ── Phase 2: per-campaign vid-daily over native_dates ───────────
+        # Concurrency: (n_campaigns × n_native_dates) calls. For 13 camps × 2
+        # native dates × 3 THB advs = 78 extra calls/day. asyncio.Semaphore(5)
+        # caps real concurrency under existing rate-limit budget.
+        per_campaign_tasks = []
+        for cid in campaign_ids:
+            for nd in native_dates:
+                per_campaign_tasks.append(
+                    (
+                        cid,
+                        _fetch_vid_daily(
+                            client,
+                            advertiser_id,
+                            nd,
+                            store_ids,
+                            [cid],
+                            item_group_ids,
+                            additive_metrics,
+                            page_size=page_size,
+                        ),
+                    )
+                )
+        # Awaited together
+        fetched_results = await _asyncio.gather(*(t[1] for t in per_campaign_tasks))
+
+        # Aggregate vid-daily by (campaign_id, vid_id) summed across native dates
+        vid_2day_by_camp: Dict[str, Dict[str, Dict[str, float]]] = {}
+        for (cid, _), rows in zip(per_campaign_tasks, fetched_results):
+            if cid not in vid_2day_by_camp:
+                vid_2day_by_camp[cid] = {}
+            for row in rows:
+                vid = str(row.get("dimensions", {}).get("item_id", ""))
+                if not vid:
+                    continue
+                if vid not in vid_2day_by_camp[cid]:
+                    vid_2day_by_camp[cid][vid] = {m: 0.0 for m in additive_metrics}
+                for m in additive_metrics:
+                    try:
+                        vid_2day_by_camp[cid][vid][m] += float(
+                            row.get("metrics", {}).get(m, 0) or 0
+                        )
+                    except (ValueError, TypeError):
+                        pass
+
+        # ── Phase 3: prorate per (campaign, vid) → accumulate per vid ───
+        # Multi-campaign same vid: summed across campaigns. Within campaign,
+        # ratio = vid_2day_metric / camp_2day_metric. PT-aligned vid metric =
+        # camp_pt_metric × ratio.
+        for cid, vid_map in vid_2day_by_camp.items():
+            camp_pt = camp_pt_by_cid.get(cid)
+            camp_2 = camp_2day.get(cid)
+            if not camp_pt or not camp_2:
+                # No campaign-level data → vids in this campaign have nothing
+                # to prorate against. Skip (likely campaign had 0 spend in window).
+                continue
+            for vid, vid_m in vid_map.items():
+                if vid not in prorated_by_vid:
+                    prorated_by_vid[vid] = {m: 0.0 for m in additive_metrics}
+                for m in additive_metrics:
+                    denom = camp_2.get(m, 0.0)
+                    if denom <= 0:
+                        continue
+                    ratio = vid_m.get(m, 0.0) / denom
+                    prorated_by_vid[vid][m] += camp_pt.get(m, 0.0) * ratio
+
+        current += timedelta(days=1)
+
+    # Completeness check (mirrors the existing aligned path).
+    if total_cost_for_completeness > 0 and last_row_utc_overall is not None:
+        last_day_end_utc = day_utc_range(end_date, shop_zone)[1]
+        last_full_hour = (now_utc - timedelta(hours=1)).replace(
+            minute=0, second=0, microsecond=0
+        )
+        expected_last = min(last_full_hour, last_day_end_utc - timedelta(hours=1))
+        lag_h = (expected_last - last_row_utc_overall).total_seconds() / 3600
+        if lag_h > _HOURS_LAG_TOLERANCE:
+            raise TikTokIncompleteDataError(
+                f"GMVMAX-vid-prorate advertiser={advertiser_id} "
+                f"dates={start_date}~{end_date} stores={store_ids}: "
+                f"latest_row={last_row_utc_overall.strftime('%Y-%m-%d %H:%M UTC')} "
+                f"lags {lag_h:.1f}h behind expected="
+                f"{expected_last.strftime('%Y-%m-%d %H:%M UTC')} "
+                f"(tol={_HOURS_LAG_TOLERANCE}) — token rate-limit truncated"
+            )
+
+    # Build response rows: list of {dimensions: {item_id}, metrics: {...str}}
+    # to match `get_gmvmax_reports` shape exactly.
+    rows: List[Dict] = []
+    for vid, m_dict in prorated_by_vid.items():
+        rows.append(
+            {
+                "dimensions": {"item_id": vid},
+                "metrics": {m: str(round(v, 4)) for m, v in m_dict.items()},
+            }
+        )
+
+    # FX-convert via shared helper. _apply_fx_to_rows uses fallback_date=end_date
+    # for rows without stat_time_day (which ours don't have).
+    converted_rows, source_currency = await _apply_fx_to_rows(
+        client, advertiser_id, rows, fallback_date=end_date
+    )
+
+    return {
+        "page_info": {
+            "total_number": len(converted_rows),
+            "total_page": 1,
+            "page": 1,
+            "page_size": page_size,
+        },
+        "list": converted_rows,
+        "currency": "USD",
+        "source_currency": source_currency,
+    }
+
+
 @api_retry(
     max_attempts=3,
     min_wait=3,
