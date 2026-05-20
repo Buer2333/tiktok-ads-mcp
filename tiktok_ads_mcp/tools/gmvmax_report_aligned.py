@@ -417,6 +417,23 @@ _NON_ADDITIVE_METRICS = {
     "creative_delivery_status",
 }
 
+# Metrics empirically supported when requested alongside `stat_time_hour` at
+# the `campaign_id` aggregation level. Beyond these, TikTok responds with
+# `40002 Invalid metric(s)` (e.g. `product_impressions` / `product_clicks`
+# are only available at coarser-than-hourly resolution).
+#
+# The vid-proration path requires camp-hourly truth, so this whitelist gates
+# which metrics flow through the hourly fetch + slice. Other requested
+# metrics get sourced from vid-daily (adv-tz day) only — for them the
+# returned values inherit the adv-tz window misalignment instead of being
+# PT-aligned. Documented in `_vid_prorate_aligned` docstring.
+_HOURLY_SUPPORTED_METRICS = {
+    "cost",
+    "gross_revenue",
+    "orders",
+    "net_cost",
+}
+
 
 async def _fetch_vid_daily(
     client: TikTokAdsClient,
@@ -574,6 +591,19 @@ async def _vid_prorate_aligned(
             f"Caller must request at least one of cost / gross_revenue / orders / etc."
         )
 
+    # Filter further to metrics TikTok actually supports at [campaign_id,
+    # stat_time_hour] resolution. product_impressions / *_clicks etc. would
+    # otherwise raise 40002 in the camp-hourly fetch and fail-soft the whole
+    # prorate path. Vid-daily fetch still uses the full `additive_metrics` list
+    # so callers get those non-hourly metrics back (at adv-tz day resolution
+    # — not PT-aligned, see docstring caveat).
+    hourly_metrics = [m for m in additive_metrics if m in _HOURLY_SUPPORTED_METRICS]
+    if not hourly_metrics:
+        raise ValueError(
+            f"_vid_prorate_aligned: no hourly-supported metrics in {metrics}. "
+            f"Need at least one of {_HOURLY_SUPPORTED_METRICS} for proration anchor."
+        )
+
     campaign_ids: List[str] = list(filtering["campaign_ids"])
     item_group_ids: List[str] = list(filtering.get("item_group_ids") or [])
 
@@ -598,6 +628,9 @@ async def _vid_prorate_aligned(
         native_dates = native_dates_for_day(d_str, shop_zone, ad_zone)
 
         # ── Phase 1: campaign-hourly across native_dates ────────────────
+        # Use hourly_metrics (TikTok-supported subset) here. Other metrics are
+        # only available at vid-daily resolution and get passed through unscaled
+        # at the proration step.
         camp_hourly_fetched = await _asyncio.gather(
             *(
                 _fetch_hourly_by_dim(
@@ -606,7 +639,7 @@ async def _vid_prorate_aligned(
                     nd,
                     store_ids,
                     dimensions=["campaign_id"],
-                    metrics=additive_metrics,
+                    metrics=hourly_metrics,
                     filtering={"campaign_ids": campaign_ids},
                     page_size=page_size,
                 )
@@ -621,7 +654,7 @@ async def _vid_prorate_aligned(
         camp_pt_rows, day_last_utc, _ = _aggregate_by_dims(
             camp_hourly_rows,
             ["campaign_id"],
-            additive_metrics,
+            hourly_metrics,
             start_utc,
             end_utc,
             ad_zone,
@@ -632,12 +665,12 @@ async def _vid_prorate_aligned(
             cid = str(r["dimensions"].get("campaign_id", ""))
             m_str = r["metrics"]
             camp_pt_by_cid[cid] = {
-                m: float(m_str.get(m, 0) or 0) for m in additive_metrics
+                m: float(m_str.get(m, 0) or 0) for m in hourly_metrics
             }
 
         # Aggregate by campaign_id over the FULL 2-native-day window (no UTC
         # slice) → camp_2day_totals (proration denominator).
-        camp_2day = _camp_2day_totals(camp_hourly_rows, additive_metrics)
+        camp_2day = _camp_2day_totals(camp_hourly_rows, hourly_metrics)
 
         # Track completeness against the last native date observed (mirrors the
         # existing aligned path's lag detection).
@@ -697,8 +730,14 @@ async def _vid_prorate_aligned(
 
         # ── Phase 3: prorate per (campaign, vid) → accumulate per vid ───
         # Multi-campaign same vid: summed across campaigns. Within campaign,
-        # ratio = vid_2day_metric / camp_2day_metric. PT-aligned vid metric =
-        # camp_pt_metric × ratio.
+        # for each metric:
+        #   - hourly_metrics (cost/gmv/orders/net_cost): full proration
+        #       ratio = vid_2day_metric / camp_2day_metric (per metric)
+        #       vid_pt = camp_pt × ratio
+        #   - other additive_metrics (product_impressions etc., camp-hourly
+        #     unsupported): pass vid_2day_metric through unchanged. The value
+        #     is adv-tz day (not PT-aligned) but it preserves the metric for
+        #     downstream display; honest about precision in the docstring.
         for cid, vid_map in vid_2day_by_camp.items():
             camp_pt = camp_pt_by_cid.get(cid)
             camp_2 = camp_2day.get(cid)
@@ -710,11 +749,15 @@ async def _vid_prorate_aligned(
                 if vid not in prorated_by_vid:
                     prorated_by_vid[vid] = {m: 0.0 for m in additive_metrics}
                 for m in additive_metrics:
-                    denom = camp_2.get(m, 0.0)
-                    if denom <= 0:
-                        continue
-                    ratio = vid_m.get(m, 0.0) / denom
-                    prorated_by_vid[vid][m] += camp_pt.get(m, 0.0) * ratio
+                    if m in hourly_metrics:
+                        denom = camp_2.get(m, 0.0)
+                        if denom <= 0:
+                            continue
+                        ratio = vid_m.get(m, 0.0) / denom
+                        prorated_by_vid[vid][m] += camp_pt.get(m, 0.0) * ratio
+                    else:
+                        # No hourly truth available — pass adv-tz day value through.
+                        prorated_by_vid[vid][m] += vid_m.get(m, 0.0)
 
         current += timedelta(days=1)
 
