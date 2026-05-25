@@ -68,6 +68,7 @@ class Decision(str, Enum):
     FETCH_RECENTLY_SEEN = "fetch_recently_seen"
     FETCH_DAILY_PROBE = "fetch_daily_probe"
     FETCH_WEEKLY_PROBE = "fetch_weekly_probe"
+    FETCH_STUCK_COLD = "fetch_stuck_cold"
     SKIP_BANNED = "skip_banned"
     SKIP_REMOVED_FROM_BC = "skip_removed_from_bc"
     SKIP_COLD_DAILY = "skip_cold_daily"
@@ -81,7 +82,15 @@ _FETCH_DECISIONS = {
     Decision.FETCH_RECENTLY_SEEN,
     Decision.FETCH_DAILY_PROBE,
     Decision.FETCH_WEEKLY_PROBE,
+    Decision.FETCH_STUCK_COLD,
 }
+
+# Stuck-cold threshold: weekly-tier cold account that hasn't been probed in
+# >= this many days → force a refresh fetch (breaks SKIP_COLD_* deadlock).
+# Rationale: weekly probe is single window (Mon 08:00 advertiser tz). If missed,
+# next chance is 7 days later. After 14d no probe = 2 missed windows → safe to
+# assume probe schedule broken or account state changed; spend 1 API to verify.
+_STUCK_COLD_DAYS = 14
 
 
 @dataclass
@@ -200,6 +209,13 @@ def should_fetch(
         if activity_cache
         else None
     )
+    days_since_probe = (
+        activity_cache.days_since_last_probe(
+            advertiser_id, store_id, ad_type_l, shop_today
+        )
+        if activity_cache
+        else None
+    )
     days_since_discovery: Optional[int] = None
     if discovery_entry and ad_type_l == "gmvmax":
         discovered_at = discovery_entry.get("discovered_at", "")
@@ -241,6 +257,25 @@ def should_fetch(
 
     # 4. Spend-based decay tiers
     if days_since_spend is None or days_since_spend >= 31:
+        # 4a. Stuck-cold force-refresh tier (breaks SKIP_COLD_* deadlock):
+        # weekly-tier cold account whose last_probe is stale >= _STUCK_COLD_DAYS
+        # → force a fetch to verify still cold. Without this, any advertiser
+        # that revives (spend resumes) after going cold gets silently dropped
+        # until next Mon 08:00 probe.
+        # NOTE: triggers only when last_probe exists but is stale. None case
+        # (never probed) falls through to original weekly_probe / SKIP path —
+        # SKIP-path record_probe will establish baseline on first SKIP, and
+        # stuck-cold fires _STUCK_COLD_DAYS later if still cold.
+        if days_since_probe is not None and days_since_probe >= _STUCK_COLD_DAYS:
+            return RosterDecision(
+                decision=Decision.FETCH_STUCK_COLD,
+                reason=(
+                    f"stuck_cold_refresh: last_probe={days_since_probe}d ago "
+                    f"(spend stale {days_since_spend}d, threshold {_STUCK_COLD_DAYS}d)"
+                ),
+                days_since_spend=days_since_spend,
+                days_since_discovery=days_since_discovery,
+            )
         # weekly window: probe on Monday at PROBE_HOUR
         if shop_now_weekday == 0 and shop_now_hour == probe_hour:
             return RosterDecision(

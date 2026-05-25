@@ -92,18 +92,31 @@ class AdvertiserActivityCache:
         ad_type: str,
         date_str: str,
         cost: float,
+        update_spend: bool = True,
     ):
-        """Record a probe result. Updates last_spend_date only when cost > 0
-        AND date_str is monotonically newer than existing last_spend_date.
+        """Record a probe event.
 
-        Always updates last_probe_date / last_probe_cost / updated_at.
+        Args:
+            update_spend: If True (default), updates last_spend_date when cost > 0
+                AND date_str is monotonically newer (existing behavior). If False,
+                caller signals this is a SKIP-path observation (e.g. active_roster
+                SKIP_COLD_* decision) — last_spend_date is NOT updated regardless
+                of cost. Used to feed `days_since_last_probe` for stuck-cold
+                force-refresh tier without polluting spend-recency signal.
+
+        Semantics of fields:
+            - last_spend_date: most recent date with cost > 0 (gated by update_spend)
+            - last_probe_date: most recent date this (adv,store,type) key was OBSERVED
+              (fetch OR SKIP). **Note: semantics expanded as of stuck-cold tier fix
+              (2026-05-25) — now includes SKIP events, not just successful fetches.**
+            - last_probe_cost: cost from most recent observation (0.0 for SKIP path)
         """
         with self._lock:
             cache = self._load()
             key = _build_key(advertiser_id, store_id, ad_type)
             existing = cache.get(key, {})
             new_last_spend = existing.get("last_spend_date", "")
-            if cost > 0 and date_str > new_last_spend:
+            if update_spend and cost > 0 and date_str > new_last_spend:
                 new_last_spend = date_str
             cache[key] = {
                 "last_spend_date": new_last_spend,
@@ -135,6 +148,33 @@ class AdvertiserActivityCache:
             return None
         return (d_today - d_last).days
 
+    def days_since_last_probe(
+        self,
+        advertiser_id: str,
+        store_id: str,
+        ad_type: str,
+        today: str,
+    ) -> Optional[int]:
+        """Return integer days from last_probe_date to today, or None if no record.
+
+        Used by active_roster's stuck-cold tier: when last_spend is stale (cold)
+        but last_probe is also stale (>=14d), force a refresh fetch to break the
+        deadlock (where SKIP_COLD_* never records → cache never updates → forever cold).
+        """
+        with self._lock:
+            entry = self._load().get(_build_key(advertiser_id, store_id, ad_type))
+        if not entry:
+            return None
+        last_probe = entry.get("last_probe_date", "")
+        if not last_probe:
+            return None
+        try:
+            d_today = date.fromisoformat(today)
+            d_last = date.fromisoformat(last_probe)
+        except ValueError:
+            return None
+        return (d_today - d_last).days
+
     def seed_last_spend(
         self,
         advertiser_id: str,
@@ -152,6 +192,34 @@ class AdvertiserActivityCache:
                 cache[key] = {
                     "last_spend_date": last_spend_date,
                     "last_probe_date": existing.get("last_probe_date", ""),
+                    "last_probe_cost": existing.get("last_probe_cost", 0.0),
+                    "updated_at": datetime.now().isoformat(timespec="seconds"),
+                }
+                self._save()
+
+    def seed_last_probe(
+        self,
+        advertiser_id: str,
+        store_id: str,
+        ad_type: str,
+        last_probe_date: str,
+    ):
+        """Backfill last_probe_date without affecting last_spend_date.
+
+        Used by active_roster_backtest.py to seed historical probe state so
+        stuck-cold tier's `days_since_last_probe` check has a baseline (vs None
+        which would trigger stuck-cold for every cold account).
+        Conservative pattern: seed last_probe_date = last_spend_date (assumes
+        probe ran each time spend was observed historically).
+        """
+        with self._lock:
+            cache = self._load()
+            key = _build_key(advertiser_id, store_id, ad_type)
+            existing = cache.get(key, {})
+            if last_probe_date > existing.get("last_probe_date", ""):
+                cache[key] = {
+                    "last_spend_date": existing.get("last_spend_date", ""),
+                    "last_probe_date": last_probe_date,
                     "last_probe_cost": existing.get("last_probe_cost", 0.0),
                     "updated_at": datetime.now().isoformat(timespec="seconds"),
                 }

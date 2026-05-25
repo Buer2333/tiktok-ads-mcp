@@ -283,8 +283,13 @@ def test_daily_boundary_day_30(caches):
 
 
 def test_weekly_window_day_31(caches):
-    """last_spend == today - 31 enters weekly window."""
+    """last_spend == today - 31 enters weekly window.
+
+    Note: also seed last_probe=today (fresh) to reflect production state where
+    SKIP path records probe each run — without it, stuck-cold tier would fire.
+    """
     caches["activity"].record_probe("adv1", STORE_A, "gmvmax", "2026-04-11", 100.0)
+    caches["activity"].seed_last_probe("adv1", STORE_A, "gmvmax", TODAY)
     # Tuesday non-probe-hour → skip
     dec = _decide(caches, hour=14, weekday=1)
     assert dec.decision == Decision.SKIP_COLD_WEEKLY
@@ -292,12 +297,14 @@ def test_weekly_window_day_31(caches):
 
 def test_weekly_probe_monday_probe_hour(caches):
     caches["activity"].record_probe("adv1", STORE_A, "gmvmax", "2026-04-01", 100.0)
+    caches["activity"].seed_last_probe("adv1", STORE_A, "gmvmax", TODAY)
     dec = _decide(caches, hour=8, weekday=0)
     assert dec.decision == Decision.FETCH_WEEKLY_PROBE
 
 
 def test_weekly_probe_monday_off_hour_skips(caches):
     caches["activity"].record_probe("adv1", STORE_A, "gmvmax", "2026-04-01", 100.0)
+    caches["activity"].seed_last_probe("adv1", STORE_A, "gmvmax", TODAY)
     dec = _decide(caches, hour=14, weekday=0)
     assert dec.decision == Decision.SKIP_COLD_WEEKLY
 
@@ -305,13 +312,15 @@ def test_weekly_probe_monday_off_hour_skips(caches):
 def test_weekly_probe_tuesday_probe_hour_skips(caches):
     """Tue at probe hour is NOT the weekly window."""
     caches["activity"].record_probe("adv1", STORE_A, "gmvmax", "2026-04-01", 100.0)
+    caches["activity"].seed_last_probe("adv1", STORE_A, "gmvmax", TODAY)
     dec = _decide(caches, hour=8, weekday=1)
     assert dec.decision == Decision.SKIP_COLD_WEEKLY
 
 
 def test_never_spent_weekly_probe(caches):
-    """No activity entry, no discovery (or stale discovery) → weekly probe path."""
-    # No record at all
+    """No activity entry, no discovery → weekly probe path (unchanged by
+    stuck-cold tier: None last_probe falls through to original logic;
+    stuck-cold only fires for stale-but-existing probes)."""
     dec = _decide(caches, hour=8, weekday=0)
     assert dec.decision == Decision.FETCH_WEEKLY_PROBE
     assert dec.days_since_spend is None
@@ -517,6 +526,9 @@ def test_recently_seen_fallback_doesnt_override_existing_spend_skip(caches, tmp_
     # record_probe with cost=0 only updates last_probe_date, leaving
     # days_since_last_spend=None which would trip the new fallback.
     caches["activity"].record_probe("adv1", STORE_A, "gmvmax", "2026-03-13", 50.0)
+    # Seed fresh last_probe so stuck-cold tier doesn't fire (reflects production
+    # state where SKIP path records probe each run, keeping last_probe ≈ today).
+    caches["activity"].seed_last_probe("adv1", STORE_A, "gmvmax", TODAY)
     dec = _decide(caches)
     assert dec.decision == Decision.SKIP_COLD_WEEKLY
 
@@ -559,3 +571,69 @@ def test_recently_seen_doesnt_override_banned(caches, tmp_path):
     )
     dec = _decide(caches, banned=True)
     assert dec.decision == Decision.SKIP_BANNED
+
+
+# ── stuck-cold tier (2026-05-25 deadlock fix) ──
+
+
+def test_stuck_cold_force_refresh_after_14_days(caches):
+    """Weekly-tier cold + last_probe >= 14d ago → FETCH_STUCK_COLD.
+
+    Models the NAD+ 文善7 case: advertiser was active long ago (last_spend 60d),
+    SKIP_COLD_WEEKLY in non-probe windows kept silently skipping, last_probe
+    eventually crossed 14d threshold → force a fetch to verify still cold.
+    """
+    caches["activity"].record_probe("adv1", STORE_A, "gmvmax", "2026-03-13", 100.0)
+    caches["activity"].seed_last_probe(
+        "adv1", STORE_A, "gmvmax", "2026-04-27"
+    )  # 15d ago
+    dec = _decide(caches, hour=14, weekday=1)
+    assert dec.decision == Decision.FETCH_STUCK_COLD
+    assert dec.fetch is True
+    assert dec.days_since_spend == 60
+    assert "stuck_cold_refresh" in dec.reason
+
+
+def test_cold_within_14_day_window_still_skip(caches):
+    """Weekly-tier cold + last_probe < 14d → SKIP_COLD_WEEKLY (stuck-cold not fired).
+
+    Ensures stuck-cold doesn't burn API every run — only after 14d quiet.
+    """
+    caches["activity"].record_probe("adv1", STORE_A, "gmvmax", "2026-03-13", 100.0)
+    caches["activity"].seed_last_probe(
+        "adv1", STORE_A, "gmvmax", "2026-05-07"
+    )  # 5d ago
+    dec = _decide(caches, hour=14, weekday=1)
+    assert dec.decision == Decision.SKIP_COLD_WEEKLY
+    assert dec.fetch is False
+
+
+def test_stuck_cold_does_not_fire_for_hot_accounts(caches):
+    """Hot accounts (last_spend < 7d) take FETCH_HOT path before stuck-cold check.
+    Stale last_probe shouldn't override hot tier."""
+    caches["activity"].record_probe(
+        "adv1", STORE_A, "gmvmax", "2026-05-09", 100.0
+    )  # 3d
+    caches["activity"].seed_last_probe("adv1", STORE_A, "gmvmax", "2026-04-12")  # 30d
+    dec = _decide(caches, hour=14, weekday=1)
+    assert dec.decision == Decision.FETCH_HOT
+
+
+def test_skip_path_record_probe_signature_compatible(caches):
+    """Phase 3 SKIP path calls record_probe(cost=0.0, update_spend=False).
+    Verify signature + semantics: last_spend NOT updated, last_probe updated."""
+    caches["activity"].record_probe(
+        "adv1", STORE_A, "gmvmax", "2026-05-25", cost=0.0, update_spend=False
+    )
+    assert (
+        caches["activity"].days_since_last_spend(
+            "adv1", STORE_A, "gmvmax", "2026-05-25"
+        )
+        is None
+    )
+    assert (
+        caches["activity"].days_since_last_probe(
+            "adv1", STORE_A, "gmvmax", "2026-05-25"
+        )
+        == 0
+    )

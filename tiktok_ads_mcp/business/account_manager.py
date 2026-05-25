@@ -780,6 +780,25 @@ class AdAccountManager:
                         f"days_since_spend={dec.days_since_spend}"
                     )
                     if roster_mode == "on" and not dec.fetch:
+                        # Record SKIP as a probe event (no spend update) so
+                        # active_roster's stuck-cold tier can use last_probe_date
+                        # to detect when a cold account has been silently skipped
+                        # too long (>= _STUCK_COLD_DAYS). Without this, SKIP_COLD_*
+                        # decisions never update activity_cache → deadlock.
+                        if self.activity_cache:
+                            try:
+                                self.activity_cache.record_probe(
+                                    advertiser_id,
+                                    store_id_for_cache,
+                                    ad_type.lower(),
+                                    date_str,
+                                    cost=0.0,
+                                    update_spend=False,
+                                )
+                            except Exception as e:  # noqa: BLE001
+                                logger.error(
+                                    f"[active_roster] SKIP-path record_probe error: {e}"
+                                )
                         return zero
             except Exception as e:  # noqa: BLE001 — never let filter take down fetch
                 logger.error(f"[active_roster] filter error, fallback to FETCH: {e}")

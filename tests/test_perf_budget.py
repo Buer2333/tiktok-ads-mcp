@@ -124,6 +124,10 @@ def _seed_roster(caches, n_hot: int, n_cold_recent: int, n_cold_old: int):
         adv = f"old_{idx:03d}"
         store = f"store_o{idx:03d}"
         caches["activity"].record_probe(adv, store, "gmvmax", cold_old_dt, 30.0)
+        # Seed fresh last_probe so stuck-cold tier (>=14d staleness threshold)
+        # doesn't fire — reflects production state where SKIP-path records probe
+        # each run, keeping last_probe ≈ today even for cold accounts.
+        caches["activity"].seed_last_probe(adv, store, "gmvmax", today)
         pairs.append((adv, store, "gmvmax"))
         idx += 1
 
