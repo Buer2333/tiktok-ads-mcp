@@ -140,7 +140,9 @@ class AdAccountManager:
             )
             existing = self.discovery_cache.get(exc_adv_id)
             is_new = existing is None
-            was_different_store = existing and existing.get("store_ids") != [sid]
+            # store_ids unions across rediscoveries (see AccountDiscoveryCache.put);
+            # "different store" = this sid is NOT yet in the recorded history.
+            was_different_store = existing and sid not in existing.get("store_ids", [])
 
             self.discovery_cache.put(
                 exc_adv_id,
@@ -422,9 +424,11 @@ class AdAccountManager:
                 camp_status = campaigns[0].get("operation_status", "")
                 existing = self.discovery_cache.get(adv_id)
                 is_new = existing is None or existing.get("ad_type") != "gmvmax"
-                was_different_store = existing and existing.get("store_ids") != [
-                    store_id
-                ]
+                # store_ids unions across rediscoveries (see AccountDiscoveryCache.put);
+                # "different store" = this store_id is NOT yet in the recorded history.
+                was_different_store = existing and store_id not in existing.get(
+                    "store_ids", []
+                )
 
                 self.discovery_cache.put(
                     adv_id,

@@ -153,7 +153,9 @@ class TestDiscoverNewAccounts:
 
     @pytest.mark.asyncio
     async def test_store_change_detected(self, manager, discovery_cache):
-        """Account moves from one store to another → returned as changed."""
+        """Account moves from one store to another → returned as changed,
+        and the OLD store binding is retained (union) so its month-to-date
+        spend stays attributable instead of being orphaned."""
         discovery_cache.put("ADV1", store_ids=["S_OLD"], ad_type="gmvmax")
 
         store_resp = _make_store_list(
@@ -171,8 +173,8 @@ class TestDiscoverNewAccounts:
 
         assert len(result) == 1
         assert result[0]["advertiser_id"] == "ADV1"
-        # Cache updated
-        assert discovery_cache.get("ADV1")["store_ids"] == ["S1"]
+        # Cache unions old + new store (history preserved, not overwritten)
+        assert discovery_cache.get("ADV1")["store_ids"] == ["S_OLD", "S1"]
 
     @pytest.mark.asyncio
     async def test_deduplicates_stores(self, manager, discovery_cache):

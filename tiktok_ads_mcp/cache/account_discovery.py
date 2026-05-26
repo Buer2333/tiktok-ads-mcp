@@ -92,13 +92,31 @@ class AccountDiscoveryCache:
         ad_type: str,
         ad_name: str = "",
     ):
-        """Add or update a discovered account."""
+        """Add or update a discovered account.
+
+        For GMVMAX accounts, store_ids accumulate as a UNION across
+        rediscoveries rather than overwriting. An advertiser that drove store A
+        early in the month then switched to store B keeps BOTH bindings, so
+        month-to-date attribution for store A is not orphaned when the binding
+        flips. (2026-05-25 NAD+ gap: advertiser 7632253804267962385 moved
+        hiileathy_life→flynew_us and $6,159 of NAD+ spend vanished from MTD.)
+        Empty or 'unknown' writes keep overwrite semantics.
+        """
         today = date.today().isoformat()
         with self._lock:
             cache = self._load()
             existing = cache.get(advertiser_id, {})
+            if ad_type == "gmvmax" and store_ids:
+                # Union with prior bindings — never shrink a real store history.
+                merged = list(existing.get("store_ids", []))
+                for sid in store_ids:
+                    if sid not in merged:
+                        merged.append(sid)
+                new_store_ids = merged
+            else:
+                new_store_ids = store_ids
             cache[advertiser_id] = {
-                "store_ids": store_ids,
+                "store_ids": new_store_ids,
                 "ad_type": ad_type,
                 "ad_name": ad_name or existing.get("ad_name", ""),
                 "discovered_at": existing.get("discovered_at", today),
