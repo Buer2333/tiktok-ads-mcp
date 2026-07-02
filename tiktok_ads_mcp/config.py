@@ -8,7 +8,7 @@ weeks and broke `/ads-report` aggregation.
 """
 
 import os
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 
 class TikTokConfig:
@@ -54,6 +54,18 @@ class TikTokConfig:
     @property
     def REQUEST_TIMEOUT(self) -> int:
         return int(os.getenv("TIKTOK_REQUEST_TIMEOUT", "30"))
+
+    @property
+    def PROXY(self) -> Optional[str]:
+        """Explicit proxy for business-api calls (e.g. library consumers like
+        lark-bot whose process must NOT set global HTTP(S)_PROXY).
+
+        business-api.tiktok.com is proxy-only reachable from some networks
+        (launch.sh 72beccc). Unset -> None -> httpx default behavior
+        (trust_env picks up HTTP(S)_PROXY as before) — zero change for
+        existing deployments (MCP server launcher / VPS direct).
+        """
+        return os.getenv("TIKTOK_ADS_PROXY") or None
 
     def validate_credentials(self) -> bool:
         """Validate that all required credentials are present"""

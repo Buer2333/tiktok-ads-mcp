@@ -54,6 +54,8 @@ class TikTokAdsClient:
         self.base_url = config.BASE_URL
         self.api_version = config.API_VERSION
         self.request_timeout = config.REQUEST_TIMEOUT
+        # TIKTOK_ADS_PROXY 定向代理（None = 沿用 httpx trust_env 默认，零行为变化）
+        self.proxy = config.PROXY
 
         # Build token list (token 2 is optional)
         self.tokens: List[str] = [config.ACCESS_TOKEN]
@@ -95,7 +97,7 @@ class TikTokAdsClient:
 
         async with (
             self._semaphore,
-            httpx.AsyncClient(timeout=self.request_timeout) as client,
+            httpx.AsyncClient(timeout=self.request_timeout, proxy=self.proxy) as client,
         ):
             logger.debug(f"Making {method} request to {url}")
 
