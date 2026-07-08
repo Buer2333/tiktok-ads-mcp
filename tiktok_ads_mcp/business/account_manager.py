@@ -545,8 +545,13 @@ class AdAccountManager:
                     }
                 )
 
-        if revived:
-            logger.info(f"resurrect watch: {len(revived)} hits on known stores")
+        # Always log a per-run summary: a silently-broken watch must not
+        # look identical to a quiet round in journalctl.
+        logger.info(
+            f"resurrect watch: {len(candidates)} candidates, "
+            f"{len(to_classify)} classified, {len(batch)} probed, "
+            f"{len(revived)} hits"
+        )
         return revived
 
     _PHASE2_BATCH_LIMIT = 20  # Max accounts to check per run (cache builds up)
