@@ -637,3 +637,53 @@ def test_skip_path_record_probe_signature_compatible(caches):
         )
         == 0
     )
+
+
+# ── resurrect watch integration (2026-07-08 incident root-fix) ──
+
+
+def test_resurrected_entry_gets_fetch_grace(caches):
+    """resurrect() bumps discovered_at to today → 7-day FETCH_GRACE window,
+    daily cost fetching resumes without manual activity-cache seeding."""
+    from datetime import date
+
+    data = caches["discovery"]._load()
+    data["adv1"] = {
+        "store_ids": [],
+        "ad_type": "archived_gmvmax",
+        "ad_name": "old",
+        "discovered_at": "2026-03-01",
+        "last_seen": "2026-03-01",
+        "banned": False,
+        "archived_at": "2026-05-18",
+    }
+    caches["discovery"]._save()
+
+    caches["discovery"].resurrect("adv1", [STORE_A], "revived")
+    d = _decide(caches, today=date.today().isoformat())
+    assert d.decision == Decision.FETCH_GRACE
+
+
+def test_resurrected_then_unauthorized_misjudge_self_heals(caches):
+    """Race: after resurrect, a stale ban_alert run may set_banned(UNAUTHORIZED)
+    before the authorized list catches up. UNAUTHORIZED is not in BAN_STATUSES,
+    so the next probe cycle re-probes and set_active clears it — meanwhile
+    should_fetch must not hard-skip (only REMOVED_FROM_BC / confirmed bans do)."""
+    from datetime import date
+
+    caches["discovery"].resurrect("adv1", [STORE_A], "revived")
+    caches["ban"].set_banned(
+        "adv1", status="UNAUTHORIZED", detected_at=date.today().isoformat()
+    )
+
+    # banned=False: caller (ad_report._is_banned) treats UNAUTHORIZED via
+    # cache, but roster itself must not REMOVED_FROM_BC-skip this entry.
+    d = _decide(caches, today=date.today().isoformat())
+    assert d.decision != Decision.SKIP_REMOVED_FROM_BC
+    assert d.decision == Decision.FETCH_GRACE
+
+    # self-heal: re-probe path clears the entry entirely
+    caches["ban"].set_active("adv1")
+    assert caches["ban"].get_status("adv1") is None
+    d2 = _decide(caches, today=date.today().isoformat())
+    assert d2.decision == Decision.FETCH_GRACE

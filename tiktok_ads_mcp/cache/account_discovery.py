@@ -8,13 +8,23 @@ Schema:
 {
   "<advertiser_id>": {
     "store_ids": ["7495613592836409756"],
-    "ad_type": "gmvmax",           // "gmvmax" | "unknown"
+    "ad_type": "gmvmax",           // "gmvmax" | "unknown" | "archived_gmvmax" (data-level, see below)
     "ad_name": "FLYL-CSW-...",
     "discovered_at": "2026-03-28",
     "last_seen": "2026-03-28",
-    "banned": false
+    "banned": false,
+    "api_status": "STATUS_ENABLE",       // optional: resurrect-watch classification
+    "status_checked_at": "2026-07-08"    // optional: last classification date
   }
 }
+
+"archived_gmvmax" is written by data-level migrations (2026-05-18 zombie
+cleanup), never by this library. All downstream consumers filter on
+ad_type == "gmvmax", so archived entries are invisible until resurrect()
+flips them back. The resurrect watch (account_manager._resurrect_watch)
+is the only reader of archived entries — without it they are a one-way
+door (2026-07-08 Hiileathy NMN incident: an archived account was reused
+by ops and its spend went unreported for 7 days).
 """
 
 import json
@@ -22,6 +32,17 @@ import threading
 from datetime import date
 from pathlib import Path
 from typing import Dict, List, Optional, Set
+
+
+def _union_store_ids(existing_ids: List[str], new_ids: List[str]) -> List[str]:
+    """Union new store_ids into existing history — never shrink a real
+    store history (2026-05-25 NAD+ gap: binding flips must not orphan
+    month-to-date attribution)."""
+    merged = list(existing_ids)
+    for sid in new_ids:
+        if sid not in merged:
+            merged.append(sid)
+    return merged
 
 
 class AccountDiscoveryCache:
@@ -107,15 +128,16 @@ class AccountDiscoveryCache:
             cache = self._load()
             existing = cache.get(advertiser_id, {})
             if ad_type == "gmvmax" and store_ids:
-                # Union with prior bindings — never shrink a real store history.
-                merged = list(existing.get("store_ids", []))
-                for sid in store_ids:
-                    if sid not in merged:
-                        merged.append(sid)
-                new_store_ids = merged
+                new_store_ids = _union_store_ids(
+                    existing.get("store_ids", []), store_ids
+                )
             else:
                 new_store_ids = store_ids
-            cache[advertiser_id] = {
+            # Spread existing first so extra fields (banned_at, api_status,
+            # status_checked_at, …) survive rediscovery instead of being
+            # silently wiped by the fixed-key rebuild.
+            entry = {
+                **existing,
                 "store_ids": new_store_ids,
                 "ad_type": ad_type,
                 "ad_name": ad_name or existing.get("ad_name", ""),
@@ -123,6 +145,14 @@ class AccountDiscoveryCache:
                 "last_seen": today,
                 "banned": existing.get("banned", False),
             }
+            if ad_type == "gmvmax" and existing.get("ad_type") not in (None, "", "gmvmax"):
+                # ad_type flipped back to gmvmax (e.g. natural Phase 1
+                # rediscovery of a data-level archived entry) — drop the
+                # stale archive markers so the entry doesn't read as
+                # "resurrected but still archived".
+                entry.pop("archived_at", None)
+                entry.pop("archive_reason", None)
+            cache[advertiser_id] = entry
             self._save()
 
     def mark_banned(self, advertiser_id: str):
@@ -135,6 +165,72 @@ class AccountDiscoveryCache:
                 if not cache[advertiser_id].get("banned_at"):
                     cache[advertiser_id]["banned_at"] = today
                 self._save()
+
+    # ── Resurrect watch (archived / retired account reuse detection) ──
+
+    def get_resurrect_candidates(self) -> Dict[str, Dict]:
+        """Return entries that may be silently reused by ops.
+
+        Two pools (2026-07-08 incident root-fix):
+        - data-level archived entries (ad_type == "archived_gmvmax")
+        - retired entries (ad_type == "gmvmax" + banned=True, written by
+          lark-bot scripts/retire_account.py via mark_banned)
+
+        Returns copies keyed by advertiser_id.
+        """
+        with self._lock:
+            cache = self._load()
+            return {
+                adv_id: dict(entry)
+                for adv_id, entry in cache.items()
+                if isinstance(entry, dict)
+                and (
+                    entry.get("ad_type") == "archived_gmvmax"
+                    or (entry.get("ad_type") == "gmvmax" and entry.get("banned"))
+                )
+            }
+
+    def record_status_check(self, advertiser_id: str, api_status: str):
+        """Persist the advertiser/info status classification for an entry.
+
+        api_status drives the resurrect watch's terminal short-circuit:
+        API-confirmed ban states never get re-classified or probed again
+        (banned accounts do not come back — user-confirmed business rule).
+        """
+        today = date.today().isoformat()
+        with self._lock:
+            cache = self._load()
+            if advertiser_id in cache:
+                cache[advertiser_id]["api_status"] = api_status
+                cache[advertiser_id]["status_checked_at"] = today
+                self._save()
+
+    def resurrect(self, advertiser_id: str, store_ids: List[str], ad_name: str = ""):
+        """Bring an archived/retired entry back into active discovery.
+
+        Unlike put(), this bumps discovered_at to today so the account
+        lands in active_roster's 7-day FETCH_GRACE window and daily cost
+        fetching resumes immediately (no manual activity-cache seeding).
+        """
+        today = date.today().isoformat()
+        with self._lock:
+            cache = self._load()
+            existing = cache.get(advertiser_id, {})
+            entry = {
+                **existing,
+                "store_ids": _union_store_ids(
+                    existing.get("store_ids", []), store_ids
+                ),
+                "ad_type": "gmvmax",
+                "ad_name": ad_name or existing.get("ad_name", ""),
+                "discovered_at": today,
+                "last_seen": today,
+                "banned": False,
+            }
+            for stale_key in ("archived_at", "archive_reason", "banned_at"):
+                entry.pop(stale_key, None)
+            cache[advertiser_id] = entry
+            self._save()
 
     def get_stale_unknowns(self, max_days: int = 14) -> Set[str]:
         """Return 'unknown' accounts not re-checked in max_days.

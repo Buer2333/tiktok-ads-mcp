@@ -221,6 +221,15 @@ class AdAccountManager:
             phase2 = await self._discover_via_campaigns(unknown_ids, known_store_ids)
             discovered.extend(phase2)
 
+        # Phase 3: resurrect watch — archived/retired accounts silently
+        # reused by ops (2026-07-08 Hiileathy NMN incident: 7 days of
+        # unreported spend). Failure must never break main discovery.
+        try:
+            revived = await self._resurrect_watch(known_store_ids, all_authorized_ids)
+            discovered.extend(revived)
+        except Exception as e:
+            logger.warning(f"resurrect watch failed (non-fatal): {e}")
+
         return discovered
 
     _BACKFILL_BATCH_LIMIT = 10  # Max per-advertiser store_list calls per run
@@ -349,6 +358,196 @@ class AdAccountManager:
                 f"discover backfill: fixed {len(fixed)} entries on known stores"
             )
         return fixed
+
+    _RESURRECT_PROBE_LIMIT = 10  # Max per-account probes per run
+    # API-confirmed ban states are terminal: banned accounts do not come
+    # back (user-confirmed business rule, mirrors ban_alert's skip-probe
+    # short-circuit). Entries classified into these states are never
+    # re-classified or probed again.
+    _TERMINAL_STATUSES = frozenset(
+        {"STATUS_LIMIT", "STATUS_DISABLE_BY_BINDTOP", "STATUS_FROZEN"}
+    )
+
+    async def _resurrect_watch(
+        self,
+        known_store_ids: Set[str],
+        authorized_ids: Set[str],
+    ) -> List[Dict]:
+        """Phase 3: detect archived/retired accounts that ops reused.
+
+        Candidate pool = archived (data-level ad_type="archived_gmvmax")
+        ∪ retired (gmvmax + banned=True), intersected with authorized_ids —
+        accounts removed from BC throw 40001 on /advertiser/info/ AND
+        poison the whole batch call (PoC 2026-07-08); a retired account
+        re-appearing in the authorized list is itself the entry signal.
+
+        Steps:
+        1. Classify (per entry ≤ once/24h): batch /advertiser/info/ status.
+           Terminal ban states short-circuit permanently.
+        2. Probe (capped, STATUS_ENABLE only, least-recently-seen first):
+           tier 1 own-view store_list exclusive match; tier 2 fallback via
+           active GMVMAX campaigns → campaign_info store_id (non-exclusive
+           reuse).
+        3. On hit: archived pool → auto-resurrect (never touches
+           ban_status_cache — archived entries were never retired).
+           Retired pool (ban_status REMOVED_FROM_BC) → alert-only
+           "RESURRECT_SUSPECT": the 2026-04-24 safety valve (commit
+           55d2ee8) forbids auto-reverting retired accounts; a human
+           confirms via lark-bot scripts/unretire_account.py. The entry
+           stays unchanged, so the hit re-fires every run — alert
+           throttling is the consumer's job (ban_alert AlertTracker).
+        """
+        from ..tools.gmvmax_campaign_info import get_gmvmax_campaign_info
+        from ..tools.gmvmax_campaigns import get_gmvmax_campaigns
+        from ..tools.gmvmax_store_list import get_gmvmax_store_list
+
+        if not self.discovery_cache:
+            return []
+
+        candidates = {
+            adv_id: entry
+            for adv_id, entry in self.discovery_cache.get_resurrect_candidates().items()
+            if adv_id in authorized_ids
+            and entry.get("api_status") not in self._TERMINAL_STATUSES
+        }
+        if not candidates:
+            return []
+
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        # Step 1: classify entries not checked in the last 24h (date-granular:
+        # status_checked_at == today means "already done this calendar day").
+        to_classify = [
+            adv_id
+            for adv_id, entry in candidates.items()
+            if entry.get("status_checked_at", "") < today
+        ]
+        for i in range(0, len(to_classify), 100):
+            batch = to_classify[i : i + 100]
+            try:
+                resp = await self.client._make_request(
+                    "GET",
+                    "advertiser/info/",
+                    {
+                        "advertiser_ids": json.dumps(batch),
+                        "fields": json.dumps(["advertiser_id", "name", "status"]),
+                    },
+                )
+            except Exception as e:
+                logger.warning(f"resurrect watch: classify batch failed: {e}")
+                continue
+            for info in resp.get("data", {}).get("list", []):
+                adv_id = info.get("advertiser_id", "")
+                status = info.get("status", "")
+                if not adv_id or not status:
+                    continue
+                self.discovery_cache.record_status_check(adv_id, status)
+                if adv_id in candidates:
+                    candidates[adv_id]["api_status"] = status
+
+        # Step 2: probe STATUS_ENABLE candidates, least-recently-seen first.
+        enabled = [
+            adv_id
+            for adv_id, entry in candidates.items()
+            if entry.get("api_status") == "STATUS_ENABLE"
+        ]
+        batch = sorted(
+            enabled, key=lambda a: candidates[a].get("last_seen", "")
+        )[: self._RESURRECT_PROBE_LIMIT]
+        if len(enabled) > self._RESURRECT_PROBE_LIMIT:
+            logger.info(
+                f"resurrect watch: {len(enabled)} enabled candidates, "
+                f"probing {len(batch)} this run (batch limit)"
+            )
+
+        revived: List[Dict] = []
+        for adv_id in batch:
+            found_sid = ""
+            found_name = ""
+            evidence = ""
+            try:
+                # Tier 1: own-view store_list — an advertiser's own
+                # perspective always includes the store it is exclusive on
+                # (bypasses Phase 1's single-BC-view blindness).
+                resp = await get_gmvmax_store_list(self.client, adv_id)
+                for s in resp.get("store_list", []) or []:
+                    exc = s.get("exclusive_authorized_advertiser_info", {})
+                    if exc.get("advertiser_id") == adv_id:
+                        found_sid = s.get("store_id", "")
+                        found_name = exc.get("advertiser_name", "")
+                        evidence = "exclusive store binding"
+                        break
+
+                # Tier 2: non-exclusive reuse — active GMVMAX campaigns
+                # reveal the store via campaign_info (Phase 2 pattern).
+                if not found_sid:
+                    result = await get_gmvmax_campaigns(
+                        self.client, adv_id, page_size=1
+                    )
+                    campaigns = result.get("campaigns", [])
+                    if campaigns:
+                        info = await get_gmvmax_campaign_info(
+                            self.client, adv_id, campaigns[0]["campaign_id"]
+                        )
+                        found_sid = info.get("info", {}).get("store_id", "")
+                        found_name = campaigns[0].get("campaign_name", "")
+                        evidence = "active gmvmax campaign"
+            except Exception as e:
+                logger.debug(f"resurrect watch: probe {adv_id} failed: {e}")
+                continue
+
+            if not found_sid:
+                # Not reused (yet). Refresh last_seen so the probe queue
+                # rotates instead of starving later candidates (backfill
+                # Step 2 lacks this and is a known counter-example).
+                self.discovery_cache.mark_seen(adv_id)
+                continue
+
+            ban_entry = (
+                self.ban_status_cache.get_status(adv_id)
+                if self.ban_status_cache
+                else None
+            )
+            if ban_entry and ban_entry.get("status") == "REMOVED_FROM_BC":
+                # Retired pool: alert-only, never auto-revert (2026-04-24
+                # safety valve). No cache mutation here.
+                logger.info(
+                    f"resurrect watch: RETIRED account {adv_id} suspected "
+                    f"reused on store {found_sid} ({evidence}) — alert only"
+                )
+                if found_sid in known_store_ids:
+                    revived.append(
+                        {
+                            "advertiser_id": adv_id,
+                            "ad_name": found_name
+                            or candidates[adv_id].get("ad_name", ""),
+                            "store_ids": [found_sid],
+                            "status": "RESURRECT_SUSPECT",
+                            "evidence": evidence,
+                        }
+                    )
+                continue
+
+            self.discovery_cache.resurrect(adv_id, [found_sid], found_name)
+            logger.info(
+                f"resurrect watch: RESURRECTED {adv_id} → store {found_sid} "
+                f"({evidence})"
+            )
+            if found_sid in known_store_ids:
+                revived.append(
+                    {
+                        "advertiser_id": adv_id,
+                        "ad_name": found_name
+                        or candidates[adv_id].get("ad_name", ""),
+                        "store_ids": [found_sid],
+                        "status": "RESURRECTED",
+                        "evidence": evidence,
+                    }
+                )
+
+        if revived:
+            logger.info(f"resurrect watch: {len(revived)} hits on known stores")
+        return revived
 
     _PHASE2_BATCH_LIMIT = 20  # Max accounts to check per run (cache builds up)
 
