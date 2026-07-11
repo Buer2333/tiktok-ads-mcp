@@ -291,7 +291,7 @@ async def get_gmvmax_range_report_aligned(
     store_ids: List[str],
     start_date: str,
     end_date: str,
-    shop_tz: str = "America/Los_Angeles",
+    shop_tz: str = "Etc/GMT+8",
 ) -> Dict[str, Any]:
     """GMVMAX date-range report, shop-tz aligned per day.
 
@@ -341,7 +341,7 @@ async def get_ads_range_report_aligned(
     advertiser_id: str,
     start_date: str,
     end_date: str,
-    shop_tz: str = "America/Los_Angeles",
+    shop_tz: str = "Etc/GMT+8",
 ) -> Dict[str, Any]:
     """Ads date-range report, shop-tz aligned per day.
 

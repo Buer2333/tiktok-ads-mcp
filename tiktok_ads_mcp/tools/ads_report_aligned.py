@@ -79,7 +79,7 @@ async def get_ads_report_aligned(
     client: TikTokAdsClient,
     advertiser_id: str,
     date: str,
-    shop_tz: str = "America/Los_Angeles",
+    shop_tz: str = "Etc/GMT+8",
     metrics: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Get Ads report aligned to shop timezone.
@@ -91,7 +91,7 @@ async def get_ads_report_aligned(
         client: TikTok API client
         advertiser_id: TikTok advertiser ID
         date: Date string (YYYY-MM-DD) in shop timezone
-        shop_tz: Shop timezone (IANA name, default America/Los_Angeles)
+        shop_tz: Shop timezone (IANA name, default Etc/GMT+8 = TikTok US 固定日切)
         metrics: Metrics to aggregate (default: spend, onsite_shopping, total_onsite_shopping_value)
 
     Returns:

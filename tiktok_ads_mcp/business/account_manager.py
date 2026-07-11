@@ -839,7 +839,7 @@ class AdAccountManager:
         advertiser_id: str,
         ad_type: str,
         store_id: str = "",
-        shop_tz: str = "America/Los_Angeles",
+        shop_tz: str = "Etc/GMT+8",
         get_day_boundaries=None,
     ):
         """Try to cache today+yesterday data for a newly banned account.
@@ -885,7 +885,7 @@ class AdAccountManager:
         advertiser_id: str,
         date_str: str,
         ad_type: str,
-        shop_tz: str = "America/Los_Angeles",
+        shop_tz: str = "Etc/GMT+8",
         store_ids: Optional[List[str]] = None,
         period: str = "today",
         banned: bool = False,
@@ -1070,7 +1070,7 @@ class AdAccountManager:
         store_ids: Optional[List[str]] = None,
         banned: bool = False,
         aligned: bool = False,
-        shop_tz: str = "America/Los_Angeles",
+        shop_tz: str = "Etc/GMT+8",
     ) -> Dict:
         """Fetch date-range ad cost with ban-awareness and cache fallback.
 
@@ -1166,7 +1166,7 @@ class AdAccountManager:
         advertiser_id: str,
         date_str: str,
         store_ids: List[str],
-        shop_tz: str = "America/Los_Angeles",
+        shop_tz: str = "Etc/GMT+8",
         period: str = "today",
         banned: bool = False,
     ) -> Dict[str, Dict]:
@@ -1348,7 +1348,7 @@ class AdAccountManager:
         start_date: str,
         end_date: str,
         aligned: bool = False,
-        shop_tz: str = "America/Los_Angeles",
+        shop_tz: str = "Etc/GMT+8",
     ) -> Dict:
         """Dispatch to the appropriate range report tool.
 

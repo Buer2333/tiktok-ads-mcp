@@ -88,7 +88,7 @@ async def get_gmvmax_report_aligned(
     advertiser_id: str,
     date: str,
     store_ids: List[str],
-    shop_tz: str = "America/Los_Angeles",
+    shop_tz: str = "Etc/GMT+8",
     metrics: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Get GMVMAX report aligned to shop timezone.
@@ -101,7 +101,7 @@ async def get_gmvmax_report_aligned(
         advertiser_id: TikTok advertiser ID
         date: Date string (YYYY-MM-DD) in shop timezone
         store_ids: TikTok Shop store IDs
-        shop_tz: Shop timezone (IANA name, default America/Los_Angeles)
+        shop_tz: Shop timezone (IANA name, default Etc/GMT+8 = TikTok US 固定日切)
         metrics: Metrics to aggregate (default: cost, gross_revenue, orders)
 
     Returns:
@@ -277,7 +277,7 @@ async def get_gmvmax_report_aligned_breakdown(
     advertiser_id: str,
     date: str,
     store_ids: List[str],
-    shop_tz: str = "America/Los_Angeles",
+    shop_tz: str = "Etc/GMT+8",
     metrics: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Per-store GMVMAX breakdown aligned to shop timezone.

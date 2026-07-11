@@ -649,7 +649,7 @@ async def get_gmvmax_report_aligned_tool(
     advertiser_id: str,
     date: str,
     store_ids: List[str],
-    shop_tz: str = "America/Los_Angeles",
+    shop_tz: str = "Etc/GMT+8",
     metrics: Optional[List[str]] = None,
 ) -> str:
     """Get GMVMAX report aligned to shop timezone. Fetches hourly data and re-aggregates to match a shop-tz day, regardless of the ad account's native timezone. Returns aggregated metrics (cost, gross_revenue, orders), ROI, and hours included."""
@@ -679,7 +679,7 @@ async def get_gmvmax_report_aligned_tool(
 async def get_ads_report_aligned_tool(
     advertiser_id: str,
     date: str,
-    shop_tz: str = "America/Los_Angeles",
+    shop_tz: str = "Etc/GMT+8",
     metrics: Optional[List[str]] = None,
 ) -> str:
     """Get Ads (manual bid) report aligned to shop timezone. Fetches hourly data and re-aggregates to match a shop-tz day. Returns cost, gmv, orders, and roas."""
