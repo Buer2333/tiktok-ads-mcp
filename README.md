@@ -29,6 +29,13 @@ A comprehensive Model Context Protocol (MCP) server for interacting with the Tik
 - TikTok Business API access
 - Valid API credentials (app ID, secret, access token)
 
+### Compatibility
+
+Works with both `mcp` 1.x and 2.x. mcp 2.0 renamed `FastMCP` to `MCPServer`
+(`mcp.server.mcpserver`) and turned `mcp.server.fastmcp` into a raising stub;
+`server.py` imports via a try-v2-except-v1 shim, so no pin is required
+(`mcp>=1.9.0`). Tests pass on 1.28.1 and 2.1.1.
+
 ## Quick Start
 
 ### Installation
