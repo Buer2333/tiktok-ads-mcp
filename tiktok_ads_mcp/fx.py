@@ -169,9 +169,13 @@ async def get_rate_to_usd(currency: str, date_str: str) -> float:
                     f"{1.0:.0f}x too large until you add a fallback entry."
                 )
                 return 1.0
+            # Not cached: historical entries are immutable, so persisting the
+            # fallback would freeze this date at the stale table value forever.
+            # Next call retries the API.
             logger.warning(
-                f"Using fallback FX rate {ccy}→USD={rate} for {date_str} (API failed)"
+                f"Using fallback FX rate {ccy}→USD={rate} for {date_str} (API failed, not cached)"
             )
+            return rate
 
         _mem_cache.setdefault(date_str, {})[ccy] = rate
         _save_disk()

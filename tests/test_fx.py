@@ -34,6 +34,20 @@ async def test_fallback_table_used_on_api_failure(caplog):
 
 
 @pytest.mark.asyncio
+async def test_fallback_not_cached(tmp_path, monkeypatch):
+    """A fallback must not be persisted as the date's rate — the next call
+    retries the API instead of serving the stale table value forever."""
+    monkeypatch.setenv("LARK_BOT_CACHE_DIR", str(tmp_path))
+    fx._reset_cache_for_test()
+    with patch.object(fx, "_fetch_from_frankfurter", AsyncMock(return_value=None)):
+        assert await fx.get_rate_to_usd("MXN", "2026-09-15") == 0.05
+    assert "MXN" not in (fx._mem_cache.get("2026-09-15") or {})
+    assert not (tmp_path / "fx_rates.json").exists()
+    with patch.object(fx, "_fetch_from_frankfurter", AsyncMock(return_value=0.0551)):
+        assert await fx.get_rate_to_usd("MXN", "2026-09-15") == 0.0551
+
+
+@pytest.mark.asyncio
 async def test_unknown_currency_returns_one_with_log(caplog):
     """Unknown currency + no API + no fallback → 1.0 + ERROR log. The 1.0 keeps
     downstream math the same magnitude as the pre-FX-aware code path."""
