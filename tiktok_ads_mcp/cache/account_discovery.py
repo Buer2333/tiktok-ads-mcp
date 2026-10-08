@@ -205,6 +205,16 @@ class AccountDiscoveryCache:
                 cache[advertiser_id]["status_checked_at"] = today
                 self._save()
 
+    def record_probe(self, advertiser_id: str, kind: str):
+        """Stamp `{kind}_probed_at` = today for an entry (per-account API probe
+        rate limit: backfill ≤ once / BACKFILL_REPROBE_DAYS, resurrect ≤ once/day)."""
+        today = date.today().isoformat()
+        with self._lock:
+            cache = self._load()
+            if advertiser_id in cache:
+                cache[advertiser_id][f"{kind}_probed_at"] = today
+                self._save()
+
     def resurrect(self, advertiser_id: str, store_ids: List[str], ad_name: str = ""):
         """Bring an archived/retired entry back into active discovery.
 

@@ -233,6 +233,14 @@ class AdAccountManager:
         return discovered
 
     _BACKFILL_BATCH_LIMIT = 10  # Max per-advertiser store_list calls per run
+    # Per-account re-probe interval for backfill Step 2. Without it the same
+    # never-resolvable entries were re-asked every hourly run (2026-10-08 prod:
+    # 10 store_list calls/hour, 48 of the 52 stale entries banned).
+    _BACKFILL_REPROBE_DAYS = 7
+
+    def _is_banned(self, adv_id: str) -> bool:
+        """BanStatusCache verdict; no cache wired → not banned."""
+        return bool(self.ban_status_cache and self.ban_status_cache.is_banned(adv_id))
 
     async def _backfill_empty_store_ids(
         self,
@@ -300,7 +308,18 @@ class AdAccountManager:
 
         # Step 2: per-advertiser store_list for remaining (capped to limit
         # API cost). Prioritize the least-recently-seen so all entries get
-        # checked over multiple runs.
+        # checked over multiple runs. Banned accounts are never probed (user
+        # rule 2026-10-08: bulk advertiser requests must exclude banned ids),
+        # and each account is probed at most once per _BACKFILL_REPROBE_DAYS.
+        reprobe_cutoff = (
+            datetime.now().date() - timedelta(days=self._BACKFILL_REPROBE_DAYS)
+        ).isoformat()
+        remaining = [
+            adv_id
+            for adv_id in remaining
+            if not self._is_banned(adv_id)
+            and cache.get(adv_id, {}).get("backfill_probed_at", "") <= reprobe_cutoff
+        ]
         if remaining:
 
             def _last_seen(adv_id: str) -> str:
@@ -314,6 +333,7 @@ class AdAccountManager:
                 )
 
             for adv_id in batch:
+                self.discovery_cache.record_probe(adv_id, "backfill")
                 try:
                     resp = await get_gmvmax_store_list(self.client, adv_id)
                 except Exception as e:
@@ -445,11 +465,14 @@ class AdAccountManager:
                 if adv_id in candidates:
                     candidates[adv_id]["api_status"] = status
 
-        # Step 2: probe STATUS_ENABLE candidates, least-recently-seen first.
+        # Step 2: probe STATUS_ENABLE candidates, least-recently-seen first,
+        # each at most once per calendar day (2026-10-08: the same 7 retired
+        # accounts were probed every hourly run, ~74 calls/day).
         enabled = [
             adv_id
             for adv_id, entry in candidates.items()
             if entry.get("api_status") == "STATUS_ENABLE"
+            and entry.get("resurrect_probed_at", "") < today
         ]
         batch = sorted(
             enabled, key=lambda a: candidates[a].get("last_seen", "")
@@ -465,6 +488,7 @@ class AdAccountManager:
             found_sid = ""
             found_name = ""
             evidence = ""
+            self.discovery_cache.record_probe(adv_id, "resurrect")
             try:
                 # Tier 1: own-view store_list — an advertiser's own
                 # perspective always includes the store it is exclusive on
