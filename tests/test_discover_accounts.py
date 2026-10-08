@@ -883,3 +883,97 @@ class TestNoBannedReprobe:
         assert sl.call_count == 1 and camps.call_count == 1
         # classify (advertiser/info) also once per day — pre-existing guard
         assert manager.client._make_request.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_failed_backfill_probe_is_still_stamped(self, manager, discovery_cache):
+        """A throwing / rate-limited probe must not be retried next hour."""
+        discovery_cache.put("STALE_ERR", store_ids=[], ad_type="gmvmax")
+        calls = []
+
+        async def _mock_store_list(_client, adv_id, **_kw):
+            calls.append(adv_id)
+            if adv_id == "STALE_ERR":
+                raise RuntimeError("40100 Too many requests")
+            return self._bc_resp()
+
+        for _ in range(2):  # two hourly runs, same day
+            with patch(
+                "tiktok_ads_mcp.tools.gmvmax_store_list.get_gmvmax_store_list",
+                new=AsyncMock(side_effect=_mock_store_list),
+            ):
+                await manager.discover_new_accounts(
+                    known_store_ids={"S1"},
+                    authorized_accounts=_make_authorized(["ADV_OWNER"]),
+                )
+        assert calls.count("STALE_ERR") == 1
+
+    @pytest.mark.asyncio
+    async def test_failed_resurrect_probe_is_still_stamped(self, manager, discovery_cache):
+        from unittest.mock import MagicMock
+
+        TestResurrectWatch._seed(None, discovery_cache, "R", ad_type="gmvmax", banned=True)
+        manager.ban_status_cache = MagicMock(**{"get_status.return_value": None,
+                                                "is_banned.return_value": True})
+        manager.client._make_request = AsyncMock(
+            return_value=TestResurrectWatch._info_response(None, {"R": "STATUS_ENABLE"})
+        )
+        sl = AsyncMock(side_effect=RuntimeError("40100 Too many requests"))
+        with patch("tiktok_ads_mcp.tools.gmvmax_store_list.get_gmvmax_store_list", new=sl):
+            await manager._resurrect_watch({"S1"}, {"R"})
+            await manager._resurrect_watch({"S1"}, {"R"})
+        assert sl.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_phase1_bc_call_uses_non_banned_account(self, manager, discovery_cache, tmp_path):
+        from tiktok_ads_mcp.cache.ban_status import BanStatusCache
+
+        bans = BanStatusCache(tmp_path / "bans2")
+        bans.set_banned("ADV_BANNED", status="STATUS_LIMIT", detected_at="2026-03-20")
+        manager.ban_status_cache = bans
+        calls = []
+
+        async def _mock_store_list(_client, adv_id, **_kw):
+            calls.append(adv_id)
+            return self._bc_resp()
+
+        with patch(
+            "tiktok_ads_mcp.tools.gmvmax_store_list.get_gmvmax_store_list",
+            new=AsyncMock(side_effect=_mock_store_list),
+        ):
+            await manager.discover_new_accounts(
+                known_store_ids={"S1"},
+                authorized_accounts=_make_authorized(["ADV_BANNED", "ADV_OWNER"]),
+            )
+        assert calls[0] == "ADV_OWNER" and "ADV_BANNED" not in calls
+
+    @pytest.mark.asyncio
+    async def test_phase2_stale_unknowns_skip_banned(self, manager, discovery_cache, tmp_path):
+        from datetime import date, timedelta
+
+        from tiktok_ads_mcp.cache.ban_status import BanStatusCache
+
+        bans = BanStatusCache(tmp_path / "bans3")
+        bans.set_banned("U_BANNED", status="STATUS_LIMIT", detected_at="2026-03-20")
+        manager.ban_status_cache = bans
+        old = (date.today() - timedelta(days=30)).isoformat()
+        for adv in ("U_BANNED", "U_LIVE"):
+            discovery_cache.put(adv, store_ids=[], ad_type="unknown")
+            data = discovery_cache._load()
+            data[adv]["last_seen"] = old
+            discovery_cache._save()
+        seen = {}
+
+        async def _phase2(ids, known):
+            seen["ids"] = set(ids)
+            return []
+
+        manager._discover_via_campaigns = _phase2
+        with patch(
+            "tiktok_ads_mcp.tools.gmvmax_store_list.get_gmvmax_store_list",
+            new=AsyncMock(return_value=self._bc_resp()),
+        ):
+            await manager.discover_new_accounts(
+                known_store_ids={"S1"},
+                authorized_accounts=_make_authorized(["ADV_OWNER", "U_BANNED", "U_LIVE"]),
+            )
+        assert "U_LIVE" in seen["ids"] and "U_BANNED" not in seen["ids"]

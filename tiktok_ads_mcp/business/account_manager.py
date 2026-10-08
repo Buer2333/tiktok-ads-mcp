@@ -100,7 +100,16 @@ class AdAccountManager:
             logger.warning("discover: no authorized accounts available")
             return []
 
-        any_adv_id = authorized_accounts[0]["advertiser_id"]
+        # Prefer a non-banned account for the BC-wide call (user rule
+        # 2026-10-08: bulk advertiser requests exclude banned ids).
+        any_adv_id = next(
+            (
+                a["advertiser_id"]
+                for a in authorized_accounts
+                if not self._is_banned(a["advertiser_id"])
+            ),
+            authorized_accounts[0]["advertiser_id"],
+        )
 
         # Phase 1: exclusive GMVMAX advertisers from store_list (1 API call)
         try:
@@ -209,7 +218,9 @@ class AdAccountManager:
         # accounts seeded as "unknown" may have become GMVMAX since.
         stale = self.discovery_cache.get_stale_unknowns(max_days=14)
         # Only re-check accounts still authorized (skip revoked ones)
-        stale_authorized = stale & all_authorized_ids
+        stale_authorized = {
+            a for a in stale & all_authorized_ids if not self._is_banned(a)
+        }
         if stale_authorized:
             logger.info(
                 f"discover: {len(stale_authorized)} stale unknowns "
@@ -522,8 +533,7 @@ class AdAccountManager:
 
             if not found_sid:
                 # Not reused (yet). Refresh last_seen so the probe queue
-                # rotates instead of starving later candidates (backfill
-                # Step 2 lacks this and is a known counter-example).
+                # rotates instead of starving later candidates.
                 self.discovery_cache.mark_seen(adv_id)
                 continue
 
