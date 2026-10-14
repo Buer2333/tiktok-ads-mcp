@@ -37,6 +37,26 @@ class TikTokIncompleteDataError(Exception):
     pass
 
 
+class TikTokTransientError(Exception):
+    """Raised on TikTok code 51010 ("Internal service timed out" / "Internal time out").
+
+    HTTP 200 + JSON code 51010 is TikTok's backend timing out; the same request
+    usually succeeds on a re-ask. Retried by @httpx_retry like 429/5xx. Before
+    2026-10-14 it fell through to a bare Exception and was never retried, so one
+    flake on a heavy GMV Max item report dropped that account from the payload.
+
+    Message stays ``TikTok API error 51010: <message>`` — callers match on it
+    (lark-bot campaign_info stale fallback, attribution error labels).
+    """
+
+    pass
+
+
+# Codes retried as TikTokTransientError (compared as strings: TikTok sends ints).
+# Only 51010 — every other non-zero code still raises on the first attempt.
+TRANSIENT_ERROR_CODES = frozenset({"51010"})
+
+
 class TikTokAdsClient:
     """TikTok Business API client with dual-token fallback."""
 
@@ -81,6 +101,7 @@ class TikTokAdsClient:
             httpx.RequestError,
             httpx.HTTPStatusError,
             TikTokRateLimitError,
+            TikTokTransientError,
         )
     )
     async def _do_request(
@@ -90,8 +111,16 @@ class TikTokAdsClient:
         endpoint: str,
         params: Optional[Dict] = None,
         data: Optional[Dict] = None,
+        attempt_counter: Optional[Dict[str, int]] = None,
     ) -> Dict[str, Any]:
-        """Execute a single HTTP request with retry on transient errors."""
+        """Execute a single HTTP request with retry on transient errors.
+
+        attempt_counter: the retry decorator re-calls this method with the same
+        arguments, so a dict passed here is shared across attempts of one
+        request; it only feeds the 51010 retry log line.
+        """
+        if attempt_counter is not None:
+            attempt_counter["n"] = attempt_counter.get("n", 0) + 1
         url = self._build_url(endpoint, params)
         headers = {"Access-Token": token, "Content-Type": "application/json"}
 
@@ -145,6 +174,23 @@ class TikTokAdsClient:
                     raise TikTokRateLimitError(
                         f"TikTok API error {error_code}: {error_msg}"
                     )
+                if str(error_code) in TRANSIENT_ERROR_CODES:
+                    # Endpoint + advertiser + page only: never the URL/headers
+                    # (oauth2 calls carry the app secret in the query string).
+                    src = params or data or {}
+                    logger.warning(
+                        "TikTok transient error %s on %s advertiser_id=%s page=%s "
+                        "attempt=%s: %s",
+                        error_code,
+                        endpoint,
+                        src.get("advertiser_id", "-"),
+                        src.get("page", "-"),
+                        (attempt_counter or {}).get("n", "?"),
+                        error_msg,
+                    )
+                    raise TikTokTransientError(
+                        f"TikTok API error {error_code}: {error_msg}"
+                    )
                 raise Exception(f"TikTok API error {error_code}: {error_msg}")
 
             return result
@@ -164,7 +210,8 @@ class TikTokAdsClient:
         if "oauth2" in endpoint:
             params.update({"app_id": self.app_id, "secret": self.secret})
             return await self._do_request(
-                self.tokens[0], method, endpoint, params, data
+                self.tokens[0], method, endpoint, params, data,
+                attempt_counter={"n": 0},
             )
 
         # Extract advertiser_id for token selection
@@ -184,7 +231,8 @@ class TikTokAdsClient:
         for idx in indices:
             try:
                 result = await self._do_request(
-                    self.tokens[idx], method, endpoint, params, data
+                    self.tokens[idx], method, endpoint, params, data,
+                    attempt_counter={"n": 0},
                 )
                 # Success — cache token mapping
                 if adv_id:
