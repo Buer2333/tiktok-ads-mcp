@@ -149,3 +149,74 @@ async def test_other_error_code_not_retried(mock_client):
     assert type(ei.value) is Exception
     assert str(ei.value) == "TikTok API error 40002: Invalid parameter"
     assert ctx.get.call_count == 1
+
+
+@pytest.fixture
+def dual_token_client():
+    with patch("tiktok_ads_mcp.client.config") as mock_config:
+        mock_config.validate_credentials.return_value = True
+        mock_config.APP_ID = "test_app"
+        mock_config.SECRET = "test_secret"
+        mock_config.BASE_URL = "https://business-api.tiktok.com/open_api"
+        mock_config.API_VERSION = "v1.3"
+        mock_config.REQUEST_TIMEOUT = 30
+        mock_config.ACCESS_TOKEN = "token1"
+        mock_config.ACCESS_TOKEN_2 = "token2"
+        mock_config.PROXY = None
+        client = TikTokAdsClient()
+    return client
+
+
+@pytest.mark.asyncio
+async def test_51010_with_two_tokens_does_not_switch_token(dual_token_client):
+    """51010 is a backend flake, not a permission verdict: retry on the same
+    token only, never fall back to token 2, never record a token mapping."""
+    assert len(dual_token_client.tokens) == 2
+    with patch("httpx.AsyncClient") as mock_httpx:
+        ctx = _patch_httpx(mock_httpx, [E51010] * 10)
+        with pytest.raises(TikTokTransientError):
+            await dual_token_client._make_request(
+                "GET", "gmv_max/report/get/", {"advertiser_id": "123"}
+            )
+    assert ctx.get.call_count == 3
+    used = [c.kwargs["headers"]["Access-Token"] for c in ctx.get.call_args_list]
+    assert used == ["token1", "token1", "token1"]
+    assert "123" not in dual_token_client._token_map
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "endpoint,params,secrets",
+    [
+        # oauth2 path: _make_request injects app_id + app secret into the query
+        ("oauth2/advertiser/get/", None, ["test_app", "test_secret"]),
+        (
+            "gmv_max/report/get/",
+            {
+                "advertiser_id": "123",
+                "access_token": "AT_SHOULD_NOT_LEAK",
+                "secret": "SECRET_SHOULD_NOT_LEAK",
+                "app_id": "APPID_SHOULD_NOT_LEAK",
+                "page": 1,
+            },
+            ["AT_SHOULD_NOT_LEAK", "SECRET_SHOULD_NOT_LEAK", "APPID_SHOULD_NOT_LEAK"],
+        ),
+    ],
+)
+async def test_51010_retry_logs_never_contain_sensitive_params(
+    mock_client, caplog, endpoint, params, secrets
+):
+    # Retry-path lines = WARNING+ from any logger (our 51010 line + mcp_retry's
+    # before_sleep line). The pre-existing DEBUG "Making GET request to <url>"
+    # line is out of scope here.
+    with caplog.at_level(logging.WARNING):
+        with patch("httpx.AsyncClient") as mock_httpx:
+            _patch_httpx(mock_httpx, [E51010, OK])
+            await mock_client._make_request("GET", endpoint, params)
+    retry_lines = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    names = {r.name for r in retry_lines}
+    assert {"tiktok_ads_mcp.client", "mcp_retry"} <= names  # real retry lines inspected
+    for record in retry_lines:
+        msg = record.getMessage()
+        for value in secrets + ["token1"]:
+            assert value not in msg, (record.name, msg)
