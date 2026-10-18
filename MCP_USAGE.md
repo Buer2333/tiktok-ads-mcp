@@ -26,10 +26,10 @@ The TikTok Ads MCP provides a comprehensive interface to the TikTok Business API
 
 ```bash
 # Install directly from GitHub (Recommended for latest features)
-pip install git+https://github.com/ysntony/tiktok-ads-mcp.git
+pip install tiktok-gmvmax-mcp
 
 # OR clone and install in development mode
-git clone https://github.com/ysntony/tiktok-ads-mcp.git
+git clone https://github.com/Buer2333/tiktok-ads-mcp.git
 cd tiktok-ads-mcp
 pip install -e .
 ```

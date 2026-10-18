@@ -106,7 +106,7 @@ Claude Desktop / Claude Code (`mcpServers`):
 ## Behavior worth knowing
 
 - **Timezones.** TikTok reports days in the ad account's timezone. The `*_aligned_tool`s fetch hourly rows and re-aggregate them into a day in the shop's timezone, so ad spend lines up with shop orders.
-- **Currency.** Cost and revenue from non-USD accounts are converted to USD at that day's ECB midpoint rate (Frankfurter). If the rate API is down, a small built-in table is used for that call only and never cached.
+- **Currency.** Cost and revenue from non-USD accounts are converted to USD at that day's ECB midpoint rate (Frankfurter). If the rate API is down, a small built-in table of approximate rates is used for that call only and never cached; any other currency is then returned unconverted (rate 1.0) with a logged error.
 - **Retries.** Code `51010` (TikTok backend timeout) is retried with backoff at the client layer. Rate-limit and 5xx errors are retried too.
 - **mcp 1.x and 2.x.** Both work: the server imports `MCPServer` (2.x) and falls back to `FastMCP` (1.x).
 
@@ -134,4 +134,4 @@ Issues and PRs are welcome. Please include a test with any behavior change.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](https://github.com/Buer2333/tiktok-ads-mcp/blob/main/LICENSE).
