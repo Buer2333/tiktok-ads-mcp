@@ -31,11 +31,18 @@ class TikTokConfig:
 
     @property
     def ACCESS_TOKEN(self) -> str:
-        return os.getenv("TIKTOK_ACCESS_TOKEN_XINCHENG", "")
+        """Primary Business API access token.
+
+        TIKTOK_ACCESS_TOKEN_XINCHENG is the legacy name, still honored so
+        existing deployments keep working unchanged.
+        """
+        return os.getenv("TIKTOK_ACCESS_TOKEN") or os.getenv("TIKTOK_ACCESS_TOKEN_XINCHENG", "")
 
     @property
     def ACCESS_TOKEN_2(self) -> str:
-        return os.getenv("TIKTOK_ACCESS_TOKEN_ZECHENG", "")
+        """Optional second token (another Business Center), used as a fallback
+        on permission errors. Legacy name: TIKTOK_ACCESS_TOKEN_ZECHENG."""
+        return os.getenv("TIKTOK_ACCESS_TOKEN_2") or os.getenv("TIKTOK_ACCESS_TOKEN_ZECHENG", "")
 
     @property
     def ADVERTISER_ID(self) -> str:

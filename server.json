@@ -1,0 +1,24 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.Buer2333/tiktok-gmvmax-mcp",
+  "title": "TikTok GMV Max",
+  "description": "Read-only TikTok Business API: GMV Max campaigns and reports, ads, BC balances.",
+  "repository": {"url": "https://github.com/Buer2333/tiktok-ads-mcp", "source": "github"},
+  "version": "0.2.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "tiktok-gmvmax-mcp",
+      "version": "0.2.0",
+      "runtimeHint": "uvx",
+      "transport": {"type": "stdio"},
+      "environmentVariables": [
+        {"name": "TIKTOK_APP_ID", "description": "TikTok Business API app ID", "isRequired": true, "isSecret": false, "format": "string"},
+        {"name": "TIKTOK_SECRET", "description": "TikTok Business API app secret", "isRequired": true, "isSecret": true, "format": "string"},
+        {"name": "TIKTOK_ACCESS_TOKEN", "description": "Long-lived Business API access token", "isRequired": true, "isSecret": true, "format": "string"},
+        {"name": "TIKTOK_ACCESS_TOKEN_2", "description": "Optional second token, tried on permission errors", "isRequired": false, "isSecret": true, "format": "string"}
+      ]
+    }
+  ]
+}

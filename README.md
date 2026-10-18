@@ -1,72 +1,98 @@
-# TikTok Ads MCP
+# TikTok GMV Max MCP
 
-A comprehensive Model Context Protocol (MCP) server for interacting with the TikTok Business API. This package provides a complete interface to access TikTok advertising campaigns, ad groups, ads, and generate detailed performance reports.
+<!-- mcp-name: io.github.Buer2333/tiktok-gmvmax-mcp -->
 
-## Features
+A read-only [Model Context Protocol](https://modelcontextprotocol.io) server for the TikTok Business (Marketing) API, with first-class **GMV Max** support. Ask your assistant how your GMV Max campaigns, regular ads, and Business Center budgets are doing, and get answers in your shop's timezone and in USD.
 
-- **Read-Only TikTok Business API Integration**: Access all major TikTok advertising endpoints for data retrieval
-- **6 Comprehensive Tools**: Business centers, ad accounts, campaigns, ad groups, ads, and reports
-- **Advanced Filtering**: Powerful filtering options for all data retrieval operations
-- **Multi-Advertiser Support**: Handle multiple advertiser accounts in a single request
-- **Flexible Reporting**: Generate detailed performance reports with custom dimensions and metrics
-- **Real-time Data**: Access live advertising data and performance metrics
-- **Error Handling**: Comprehensive error handling and validation
-- **Modular Architecture**: Clean, maintainable code structure
-- **Safe Operations**: All tools are read-only and will not modify your campaigns or ad data
+It runs daily in production behind a multi-shop TikTok Shop reporting stack, so most of the code beyond plain API wrappers handles things the raw API gets wrong. Report days are realigned from the ad account's timezone to the shop's. Non-USD accounts are converted at that day's rate. TikTok's transient `51010` timeouts are retried.
 
-## Available Tools
+> Started as a fork of [ysntony/tiktok-ads-mcp](https://github.com/ysntony/tiktok-ads-mcp) (MIT), which covers the six core campaign/report tools. This project adds GMV Max, timezone-aligned and range reports, creatives, Business Center finance and trending hashtags, and is published separately as `tiktok-gmvmax-mcp`. The Python import package is still `tiktok_ads_mcp`, so don't install both distributions into the same environment.
 
-1. **get_business_centers** - Retrieve business centers accessible by your access token
-2. **get_authorized_ad_accounts** - Get all authorized advertiser accounts
-3. **get_campaigns** - Retrieve campaigns with comprehensive filtering options
-4. **get_ad_groups** - Get ad groups with advanced filtering and targeting options
-5. **get_ads** - Retrieve ads with detailed creative and performance data
-6. **get_reports** - Generate comprehensive performance reports and analytics
+## Tools (24, all read-only)
 
-## Prerequisites
+**GMV Max**
 
-- Python 3.14.0 or higher
-- TikTok Business API access
-- Valid API credentials (app ID, secret, access token)
+| Tool | What it returns |
+|---|---|
+| `get_gmvmax_campaigns_tool` | GMV Max campaigns with status and ROI-protection info |
+| `get_gmvmax_campaign_info_tool` | Budget, bid, products and schedule for one campaign |
+| `get_gmvmax_reports_tool` | GMV Max performance reports (`/gmv_max/report/get/`) |
+| `get_gmvmax_report_aligned_tool` | One shop-timezone day, rebuilt from hourly data: cost, gross revenue, orders, ROI |
+| `get_gmvmax_range_report_tool` | Aggregate cost / GMV / orders / ROI for a date range |
+| `get_gmvmax_videos_tool` | Videos available to GMV Max for a store |
+| `get_gmvmax_store_list_tool` | Stores linked to a GMV Max advertiser |
 
-### Compatibility
+**Accounts, campaigns and ads**
 
-Works with both `mcp` 1.x and 2.x. mcp 2.0 renamed `FastMCP` to `MCPServer`
-(`mcp.server.mcpserver`) and turned `mcp.server.fastmcp` into a raising stub;
-`server.py` imports via a try-v2-except-v1 shim, so no pin is required
-(`mcp>=1.9.0`). Tests pass on 1.28.1 and 2.1.1.
+| Tool | What it returns |
+|---|---|
+| `get_business_centers_tool` | Business Centers visible to the token |
+| `get_authorized_ad_accounts_tool` | All authorized advertiser accounts |
+| `get_campaigns_tool` / `get_ad_groups_tool` / `get_ads_tool` | Campaign, ad group and ad lists with filtering |
+| `get_identities_tool` | TikTok identities (creator accounts) authorized to an advertiser |
+| `get_video_info_tool` | Video asset URL, poster and duration by video ID |
 
-## Quick Start
+**Reporting**
 
-### Installation
+| Tool | What it returns |
+|---|---|
+| `get_reports_tool` | Integrated reports with custom dimensions and metrics |
+| `get_ads_report_aligned_tool` | Manual-bid ads, one shop-timezone day: cost, GMV, orders, ROAS |
+| `get_ads_range_report_tool` | Manual-bid ads aggregate for a date range |
+| `get_creative_report_tool` | Creative-level video insights (engagement, play metrics) |
 
-1. **Download the TikTok Ads MCP**
-   - Click the green "Code" button at the top of the GitHub page
-   - Select "Download ZIP"
-   - Unzip the downloaded file to a location you can easily find (like your Documents folder)
+**Business Center finance**
 
-2. **Alternatively, if you're familiar with Git:**
-   ```bash
-   git clone https://github.com/ysntony/tiktok-ads-mcp.git
-   ```
+| Tool | What it returns |
+|---|---|
+| `get_advertiser_balance_tool` | Balance and basic info per advertiser (≤100 IDs per call) |
+| `get_bc_balance_tool` | Business Center available funds |
+| `get_bc_account_cost_tool` | Spend per ad account under a BC for a date range |
+| `get_bc_transactions_tool` | Top-ups and deductions at BC or advertiser level |
+| `get_bc_budget_changelog_tool` | Who changed an advertiser's budget, and when |
 
-3. **Install Dependencies**
-   ```bash
-   cd tiktok-ads-mcp
-   pip install -e .
-   ```
+**Discovery**
 
+| Tool | What it returns |
+|---|---|
+| `get_trending_list_tool` | Trending hashtags by country (7 or 30 days), optional daily history |
 
-### Configuration
+## Install
 
-1. **Set up environment variables** in your MCP client configuration:
+Requires Python 3.10+.
+
+```bash
+uvx tiktok-gmvmax-mcp          # run without installing
+# or
+pip install tiktok-gmvmax-mcp  # provides the `tiktok-gmvmax-mcp` command
+```
+
+## Configure
+
+Create an app in the [TikTok for Business developer portal](https://business-api.tiktok.com/portal/), grant it read permissions for the endpoints you need (ad accounts, campaigns and ads, reporting, GMV Max, Business Center), and generate a long-lived access token.
+
+| Variable | Required | Meaning |
+|---|---|---|
+| `TIKTOK_APP_ID` | yes | App ID |
+| `TIKTOK_SECRET` | yes | App secret |
+| `TIKTOK_ACCESS_TOKEN` | yes | Access token |
+| `TIKTOK_ACCESS_TOKEN_2` | no | Second token (e.g. another Business Center), tried on permission errors |
+| `TIKTOK_ADVERTISER_ID` | no | Default advertiser |
+| `TIKTOK_SANDBOX` | no | `true` to use the sandbox API |
+| `TIKTOK_REQUEST_TIMEOUT` | no | Seconds, default 30 |
+| `TIKTOK_ADS_PROXY` | no | Proxy URL used only for Business API calls |
+| `LARK_BOT_CACHE_DIR` | no | Where FX rates are cached (default `~/.cache/lark-bot`) |
+
+Versions before 0.2 read the token from `TIKTOK_ACCESS_TOKEN_XINCHENG` / `TIKTOK_ACCESS_TOKEN_ZECHENG`. Those names still work.
+
+Claude Desktop / Claude Code (`mcpServers`):
 
 ```json
 {
   "mcpServers": {
-    "tiktok-ads": {
-      "command": "python",
-      "args": ["-m", "tiktok_ads_mcp"],
+    "tiktok-gmvmax": {
+      "command": "uvx",
+      "args": ["tiktok-gmvmax-mcp"],
       "env": {
         "TIKTOK_APP_ID": "your_app_id",
         "TIKTOK_SECRET": "your_secret",
@@ -77,148 +103,35 @@ Works with both `mcp` 1.x and 2.x. mcp 2.0 renamed `FastMCP` to `MCPServer`
 }
 ```
 
-2. **Required credentials**:
-   - `TIKTOK_APP_ID`: Your TikTok app ID
-   - `TIKTOK_SECRET`: Your TikTok app secret
-   - `TIKTOK_ACCESS_TOKEN`: Your access token
+## Behavior worth knowing
 
-   **How to get these credentials:**
-   1. Go to the [TikTok for Business Developers](https://ads.tiktok.com/marketing_api/) portal and log in.
-   2. Click "My Apps" and create a new app.
-   3. Select "Marketing API" as the service type.
-   4. In the app settings, enable permissions related to **Reading** and **Reporting** (e.g., `Ads Management`, `Reporting`).
-   5. Once approved, you will find your `App ID` and `Secret` in the app details.
-   6. Generate an `Access Token` using the "TikTok Marketing API Inspector" or via the OAuth flow documented in the portal.
+- **Timezones.** TikTok reports days in the ad account's timezone. The `*_aligned_tool`s fetch hourly rows and re-aggregate them into a day in the shop's timezone, so ad spend lines up with shop orders.
+- **Currency.** Cost and revenue from non-USD accounts are converted to USD at that day's ECB midpoint rate (Frankfurter). If the rate API is down, a small built-in table is used for that call only and never cached.
+- **Retries.** Code `51010` (TikTok backend timeout) is retried with backoff at the client layer. Rate-limit and 5xx errors are retried too.
+- **mcp 1.x and 2.x.** Both work: the server imports `MCPServer` (2.x) and falls back to `FastMCP` (1.x).
 
-### Usage
+## Development
 
-Once configured, you can use the MCP tools through your MCP client (like Cursor, Claude Desktop, etc.):
+```bash
+git clone https://github.com/Buer2333/tiktok-ads-mcp && cd tiktok-ads-mcp
+python -m venv .venv && .venv/bin/pip install -e ".[dev]"
+.venv/bin/python -m pytest tests -q
+```
 
-- **Get business centers and advertiser accounts** to discover available accounts
-- **Retrieve campaigns** with filtering by status, objective, or date range
-- **Access ad groups** with advanced targeting and optimization settings
-- **View ads** with detailed creative and performance data
-- **Generate reports** with custom dimensions, metrics, and time ranges
-- **Access real-time advertising data** and performance metrics
-
-## API Coverage
-
-This MCP server provides **read-only** access to the TikTok Business API:
-
-### Business Management
-- Business center retrieval and access
-- Advertiser account information and permissions
-
-### Campaign Management
-- Campaign retrieval and filtering
-- Campaign status and performance monitoring
-- Campaign budget and objective information
-
-### Ad Group Management
-- Ad group retrieval and filtering
-- Advanced targeting and optimization settings
-- Performance monitoring and analysis
-
-### Ad Management
-- Ad retrieval and filtering
-- Creative asset information
-- Performance tracking and analysis
-
-### Reporting & Analytics
-- Basic performance reports
-- Audience insights reports
-- Playable ads reports
-- DSA (Dynamic Search Ads) reports
-- Business Center reports
-- GMV max ads reports
-
-## Key Features
-
-### Advanced Filtering
-All tools support comprehensive filtering options:
-- Status-based filtering (active, paused, deleted)
-- Time-based filtering (creation date, modification date)
-- Performance-based filtering (budget, optimization goals)
-- Creative filtering (ad formats, material types)
-
-### Modern Implementation
-This package uses the official FastMCP framework for optimal performance and developer experience:
-
-- **Automatic Schema Generation**: From Python type hints
-- **Simplified Tool Registration**: Using `@app.tool()` decorators
-- **Built-in Error Handling**: Consistent error responses
-- **Type Safety**: Full parameter validation from type hints
-- **Future-Proof**: Part of the official MCP SDK
-
-### Multi-Advertiser Support
-- Handle multiple advertiser accounts in single requests
-- Cross-advertiser reporting and analytics
-- Unified data access across accounts
-
-### Flexible Reporting
-- Custom dimensions and metrics
-- Multiple report types and data levels
-- Time-based and lifetime metrics
-- Aggregated and detailed views
-
-### Error Handling
-- Comprehensive parameter validation
-- Detailed error messages and suggestions
-- Graceful handling of API limitations
-- Rate limiting and retry logic
-
-## Documentation
-
-- **MCP_USAGE.md**: Comprehensive usage guide with examples
-- **TikTok Business API**: Official API documentation
-- **Project Wiki**: Additional resources and guides
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Implement your changes
-4. Add tests and documentation
-5. Submit a pull request
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Support
-
-For issues and questions:
-1. Check the [MCP_USAGE.md](MCP_USAGE.md) documentation
-2. Review the [TikTok Business API documentation](https://developers.tiktok.com/doc/tiktok-business-api)
-3. Open an issue on the GitHub repository
-4. Contact the development team
+Issues and PRs are welcome. Please include a test with any behavior change.
 
 ## Changelog
 
-### v0.1.3 (Current)
-- **Async Support**: Complete refactor to use `async/await` with `httpx` for improved performance
-- **Retry Logic**: Added automatic retries for rate limits and server errors using `tenacity`
-- **Error Handling**: Simplified and standardized error handling with decorators
-- **Dependencies**: Switched from `requests` to `httpx`
+### 0.2.0
+- Published as `tiktok-gmvmax-mcp` (the PyPI name `tiktok-ads-mcp` belongs to the upstream project).
+- Generic `TIKTOK_ACCESS_TOKEN` / `TIKTOK_ACCESS_TOKEN_2`. The legacy names still work.
+- CLI logs go to stderr, so stdout stays clean for the stdio protocol.
+- FX: a fallback rate used during an API outage is no longer cached permanently.
+- 18 tools added since the fork: GMV Max, aligned and range reports, creatives, Business Center finance, identities, trending. Also added: account discovery, 51010 retry, USD conversion, mcp 2.x compatibility.
 
-### v0.1.2
-- **FastMCP Implementation**: Modern MCP server using official FastMCP framework
-- **70% Code Reduction**: Compared to traditional MCP implementations
-- **Automatic Schema Generation**: From Python type hints
-- **Simplified Tool Registration**: Using `@app.tool()` decorators
-- **Enhanced Error Handling**: Built-in error handling with consistent responses
-- **Type Safety**: Full parameter validation from type hints
-- **Future-Proof**: Part of the official MCP SDK
+### 0.1.x (upstream)
+- Six core tools, async `httpx` client, FastMCP server. See [ysntony/tiktok-ads-mcp](https://github.com/ysntony/tiktok-ads-mcp).
 
-### v0.1.1
-- Complete implementation of all 6 tools
-- Advanced filtering and reporting capabilities
-- Multi-advertiser support
-- Comprehensive error handling
-- Modular tools architecture
-- Complete documentation and usage guides
+## License
 
-### v0.1.0
-- Initial release with basic MCP server structure
-- Core API client implementation
-- Basic authentication and configuration
+MIT. See [LICENSE](LICENSE).
