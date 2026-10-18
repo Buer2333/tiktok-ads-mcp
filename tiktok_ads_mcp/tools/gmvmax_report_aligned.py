@@ -69,8 +69,8 @@ async def _fetch_hourly(
     if response.get("code") == 0:
         return response.get("data", {}).get("list", [])
     # Non-0 code: surface so caller (and @api_retry) can react instead of
-    # silently treating as "no data". 2026-04-21 bug: swallowed non-0 responses
-    # caused 4/5 groups to under-report today cost by $50-$1610 simultaneously.
+    # silently treating as "no data". Swallowing them once made most
+    # accounts under-report today's cost at the same time.
     raise Exception(
         f"gmv_max/report/get/ returned code={response.get('code')} "
         f"msg={response.get('message')!r} for advertiser={advertiser_id} date={date_str}"
@@ -101,7 +101,7 @@ async def get_gmvmax_report_aligned(
         advertiser_id: TikTok advertiser ID
         date: Date string (YYYY-MM-DD) in shop timezone
         store_ids: TikTok Shop store IDs
-        shop_tz: Shop timezone (IANA name, default Etc/GMT+8 = TikTok US 固定日切)
+        shop_tz: Shop timezone (IANA name, default Etc/GMT+8 = TikTok US fixed day boundary)
         metrics: Metrics to aggregate (default: cost, gross_revenue, orders)
 
     Returns:

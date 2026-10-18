@@ -139,7 +139,7 @@ Retrieves all authorized ad accounts accessible by the current access token.
   "count": 2,
   "advertisers": [
     {
-      "advertiser_id": "7441431575776520000",
+      "advertiser_id": "1234567890123456789",
       "advertiser_name": "My Ad Account",
       "status": "STATUS_ENABLE",
       "company": "My Company",
@@ -162,7 +162,7 @@ Retrieves campaigns for a specific advertiser with optional filtering.
 
 **Example:**
 ```json
-  "advertiser_id": "7441431575776520000",
+  "advertiser_id": "1234567890123456789",
   "filters": {
     "campaign_ids": ["123456789", "987654321"]
   }
@@ -173,7 +173,7 @@ Retrieves campaigns for a specific advertiser with optional filtering.
 ```json
 {
   "success": true,
-  "advertiser_id": "7441431575776520000",
+  "advertiser_id": "1234567890123456789",
   "count": 2,
   "campaigns": [
     {
@@ -216,7 +216,7 @@ Retrieves ad groups for a specific advertiser with comprehensive filtering.
 **Example:**
 ```json
 {
-  "advertiser_id": "7441431575776520000",
+  "advertiser_id": "1234567890123456789",
   "campaign_id": "123456789",
   "filters": {
     "primary_status": "STATUS_ALL",
@@ -231,7 +231,7 @@ Retrieves ad groups for a specific advertiser with comprehensive filtering.
 ```json
 {
   "success": true,
-  "advertiser_id": "7441431575776520000",
+  "advertiser_id": "1234567890123456789",
   "campaign_id": "123456789",
   "count": 3,
   "ad_groups": [
@@ -275,7 +275,7 @@ Retrieves ads for a specific advertiser with detailed filtering options.
 **Example:**
 ```json
 {
-  "advertiser_id": "7441431575776520000",
+  "advertiser_id": "1234567890123456789",
   "adgroup_id": "987654321",
   "filters": {
     "primary_status": "STATUS_ALL",
@@ -290,7 +290,7 @@ Retrieves ads for a specific advertiser with detailed filtering options.
 ```json
 {
   "success": true,
-  "advertiser_id": "7441431575776520000",
+  "advertiser_id": "1234567890123456789",
   "adgroup_id": "987654321",
   "count": 5,
   "ads": [
@@ -346,7 +346,7 @@ Generates comprehensive performance reports and analytics.
 **Example:**
 ```json
 {
-  "advertiser_id": "7441431575776520000",
+  "advertiser_id": "1234567890123456789",
   "report_type": "BASIC",
   "data_level": "AUCTION_CAMPAIGN",
   "dimensions": ["campaign_id", "stat_time_day"],
@@ -426,7 +426,7 @@ Returns trending hashtags from TikTok Discovery API (`/discovery/trending_list/`
 **Example request:**
 ```json
 {
-  "advertiser_id": "7319310593524023298",
+  "advertiser_id": "1234567890123456789",
   "discovery_type": "HASHTAG",
   "country_code": "US",
   "date_range": "7DAY",
@@ -466,7 +466,7 @@ Returns trending hashtags from TikTok Discovery API (`/discovery/trending_list/`
 2. **Get campaigns:**
 ```json
 {
-  "advertiser_id": "7441431575776520000",
+  "advertiser_id": "1234567890123456789",
   "page": 1,
   "page_size": 10
 }
@@ -475,7 +475,7 @@ Returns trending hashtags from TikTok Discovery API (`/discovery/trending_list/`
 3. **Get ad groups for a campaign:**
 ```json
 {
-  "advertiser_id": "7441431575776520000",
+  "advertiser_id": "1234567890123456789",
   "campaign_id": "123456789",
   "page": 1,
   "page_size": 10
@@ -485,7 +485,7 @@ Returns trending hashtags from TikTok Discovery API (`/discovery/trending_list/`
 4. **Get ads for an ad group:**
 ```json
 {
-  "advertiser_id": "7441431575776520000",
+  "advertiser_id": "1234567890123456789",
   "adgroup_id": "987654321",
   "page": 1,
   "page_size": 10
@@ -495,7 +495,7 @@ Returns trending hashtags from TikTok Discovery API (`/discovery/trending_list/`
 5. **Generate performance report:**
 ```json
 {
-  "advertiser_id": "7441431575776520000",
+  "advertiser_id": "1234567890123456789",
   "report_type": "BASIC",
   "data_level": "AUCTION_CAMPAIGN",
   "dimensions": ["campaign_id", "stat_time_day"],
@@ -510,7 +510,7 @@ Returns trending hashtags from TikTok Discovery API (`/discovery/trending_list/`
 **Filter campaigns by status:**
 ```json
 {
-  "advertiser_id": "7441431575776520000",
+  "advertiser_id": "1234567890123456789",
   "filters": {
     "primary_status": "STATUS_ALL"
   }
@@ -520,7 +520,7 @@ Returns trending hashtags from TikTok Discovery API (`/discovery/trending_list/`
 **Filter ads by format and creation time:**
 ```json
 {
-  "advertiser_id": "7441431575776520000",
+  "advertiser_id": "1234567890123456789",
   "filters": {
     "ad_format": "SINGLE_VIDEO",
     "creation_filter_start_time": "2024-01-01 00:00:00",

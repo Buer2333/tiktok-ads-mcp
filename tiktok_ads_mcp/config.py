@@ -15,7 +15,7 @@ class TikTokConfig:
     """Configuration class for TikTok Business API.
 
     All env vars are read at access time (properties), not at import time,
-    so that callers like lark-bot can load .env files before first use.
+    so that library consumers can load .env files before first use.
     """
 
     # API URLs (static)
@@ -64,8 +64,8 @@ class TikTokConfig:
 
     @property
     def PROXY(self) -> Optional[str]:
-        """Explicit proxy for business-api calls (e.g. library consumers like
-        lark-bot whose process must NOT set global HTTP(S)_PROXY).
+        """Explicit proxy for business-api calls (e.g. library consumers whose
+        process must NOT set global HTTP(S)_PROXY).
 
         business-api.tiktok.com is proxy-only reachable from some networks
         (launch.sh 72beccc). Unset -> None -> httpx default behavior

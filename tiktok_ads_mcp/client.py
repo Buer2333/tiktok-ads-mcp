@@ -46,7 +46,7 @@ class TikTokTransientError(Exception):
     flake on a heavy GMV Max item report dropped that account from the payload.
 
     Message stays ``TikTok API error 51010: <message>`` — callers match on it
-    (lark-bot campaign_info stale fallback, attribution error labels).
+    (e.g. stale-data fallbacks and error labels in consuming services).
     """
 
     pass
@@ -74,7 +74,7 @@ class TikTokAdsClient:
         self.base_url = config.BASE_URL
         self.api_version = config.API_VERSION
         self.request_timeout = config.REQUEST_TIMEOUT
-        # TIKTOK_ADS_PROXY 定向代理（None = 沿用 httpx trust_env 默认，零行为变化）
+        # TIKTOK_ADS_PROXY: explicit proxy for Business API calls (None = httpx trust_env default)
         self.proxy = config.PROXY
 
         # Build token list (token 2 is optional)

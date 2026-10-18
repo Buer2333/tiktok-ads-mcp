@@ -239,8 +239,8 @@ def should_fetch(
     # on its current store. Only fires when activity_cache has no record at
     # all for this key (days_since_spend is None) — does NOT override the
     # normal cold-decay skip when there's a real stale-spend signal.
-    # Regression for FlyNew-MX-Shilajit ...896976 on 2026-05-15: cost=$174.27
-    # silently dropped because cache key used old store_id.
+    # Regression: a day's cost was silently dropped because the cache key
+    # used the account's old store_id.
     if days_since_spend is None and discovery_entry:
         last_seen = discovery_entry.get("last_seen", "")
         days_since_last_seen = _days_between(shop_today, last_seen)

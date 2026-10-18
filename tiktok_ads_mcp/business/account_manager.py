@@ -233,8 +233,7 @@ class AdAccountManager:
             discovered.extend(phase2)
 
         # Phase 3: resurrect watch — archived/retired accounts silently
-        # reused by ops (2026-07-08 Hiileathy NMN incident: 7 days of
-        # unreported spend). Failure must never break main discovery.
+        # reused by ops (one such reuse once went unreported for 7 days). Failure must never break main discovery.
         try:
             revived = await self._resurrect_watch(known_store_ids, all_authorized_ids)
             discovered.extend(revived)
@@ -424,7 +423,7 @@ class AdAccountManager:
            Retired pool (ban_status REMOVED_FROM_BC) → alert-only
            "RESURRECT_SUSPECT": the 2026-04-24 safety valve (commit
            55d2ee8) forbids auto-reverting retired accounts; a human
-           confirms via lark-bot scripts/unretire_account.py. The entry
+           confirms and reverts it out of band. The entry
            stays unchanged, so the hit re-fires every run — alert
            throttling is the consumer's job (ban_alert AlertTracker).
         """
@@ -878,7 +877,7 @@ class AdAccountManager:
     ):
         """Try to cache today+yesterday data for a newly banned account.
 
-        get_day_boundaries is injected by the caller (lark-bot's shop_api function)
+        get_day_boundaries is injected by the caller (the consuming service's Shop API code)
         since it depends on the Shop API domain.
         """
         if get_day_boundaries is None:

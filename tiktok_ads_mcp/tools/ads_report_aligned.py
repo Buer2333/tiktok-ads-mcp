@@ -91,7 +91,7 @@ async def get_ads_report_aligned(
         client: TikTok API client
         advertiser_id: TikTok advertiser ID
         date: Date string (YYYY-MM-DD) in shop timezone
-        shop_tz: Shop timezone (IANA name, default Etc/GMT+8 = TikTok US 固定日切)
+        shop_tz: Shop timezone (IANA name, default Etc/GMT+8 = TikTok US fixed day boundary)
         metrics: Metrics to aggregate (default: spend, onsite_shopping, total_onsite_shopping_value)
 
     Returns:
