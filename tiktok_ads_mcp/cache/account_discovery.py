@@ -7,9 +7,9 @@ Replaces manual bitable maintenance for GMVMAX account mapping.
 Schema:
 {
   "<advertiser_id>": {
-    "store_ids": ["7495613592836409756"],
+    "store_ids": ["<store_id>"],
     "ad_type": "gmvmax",           // "gmvmax" | "unknown" | "archived_gmvmax" (data-level, see below)
-    "ad_name": "FLYL-CSW-...",
+    "ad_name": "<campaign name>",
     "discovered_at": "2026-03-28",
     "last_seen": "2026-03-28",
     "banned": false,
@@ -23,8 +23,7 @@ cleanup), never by this library. All downstream consumers filter on
 ad_type == "gmvmax", so archived entries are invisible until resurrect()
 flips them back. The resurrect watch (account_manager._resurrect_watch)
 is the only reader of archived entries — without it they are a one-way
-door (2026-07-08 Hiileathy NMN incident: an archived account was reused
-by ops and its spend went unreported for 7 days).
+door (an archived account reused by ops once went unreported for 7 days).
 """
 
 import json
@@ -36,8 +35,7 @@ from typing import Dict, List, Optional, Set
 
 def _union_store_ids(existing_ids: List[str], new_ids: List[str]) -> List[str]:
     """Union new store_ids into existing history — never shrink a real
-    store history (2026-05-25 NAD+ gap: binding flips must not orphan
-    month-to-date attribution)."""
+    store history (binding flips must not orphan month-to-date attribution)."""
     merged = list(existing_ids)
     for sid in new_ids:
         if sid not in merged:
@@ -119,8 +117,8 @@ class AccountDiscoveryCache:
         rediscoveries rather than overwriting. An advertiser that drove store A
         early in the month then switched to store B keeps BOTH bindings, so
         month-to-date attribution for store A is not orphaned when the binding
-        flips. (2026-05-25 NAD+ gap: advertiser 7632253804267962385 moved
-        hiileathy_life→flynew_us and $6,159 of NAD+ spend vanished from MTD.)
+        flips. (Without the union, an advertiser that moved stores mid-month
+        made its earlier spend vanish from month-to-date totals.)
         Empty or 'unknown' writes keep overwrite semantics.
         """
         today = date.today().isoformat()
@@ -173,8 +171,7 @@ class AccountDiscoveryCache:
 
         Two pools (2026-07-08 incident root-fix):
         - data-level archived entries (ad_type == "archived_gmvmax")
-        - retired entries (ad_type == "gmvmax" + banned=True, written by
-          lark-bot scripts/retire_account.py via mark_banned)
+        - retired entries (ad_type == "gmvmax" + banned=True, written via mark_banned)
 
         Returns copies keyed by advertiser_id.
         """

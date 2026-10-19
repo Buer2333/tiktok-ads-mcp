@@ -10,7 +10,7 @@ Why a dedicated cache (not reusing ad_cost.json):
   - Different semantics: ad_cost stores per-day cost values; this one stores
     "max date with cost > 0 ever observed", which is monotonic and small.
 
-Schema (~/.cache/lark-bot/advertiser_activity.json):
+Schema (advertiser_activity.json in the cache directory):
 {
   "<advertiser_id>:<store_id>:<ad_type>": {
     "last_spend_date": "2026-05-08",   # YYYY-MM-DD or "" if never seen w/ spend

@@ -15,7 +15,7 @@ class TikTokConfig:
     """Configuration class for TikTok Business API.
 
     All env vars are read at access time (properties), not at import time,
-    so that callers like lark-bot can load .env files before first use.
+    so that library consumers can load .env files before first use.
     """
 
     # API URLs (static)
@@ -31,11 +31,18 @@ class TikTokConfig:
 
     @property
     def ACCESS_TOKEN(self) -> str:
-        return os.getenv("TIKTOK_ACCESS_TOKEN_XINCHENG", "")
+        """Primary Business API access token.
+
+        TIKTOK_ACCESS_TOKEN_XINCHENG is the legacy name, still honored so
+        existing deployments keep working unchanged.
+        """
+        return os.getenv("TIKTOK_ACCESS_TOKEN") or os.getenv("TIKTOK_ACCESS_TOKEN_XINCHENG", "")
 
     @property
     def ACCESS_TOKEN_2(self) -> str:
-        return os.getenv("TIKTOK_ACCESS_TOKEN_ZECHENG", "")
+        """Optional second token (another Business Center), used as a fallback
+        on permission errors. Legacy name: TIKTOK_ACCESS_TOKEN_ZECHENG."""
+        return os.getenv("TIKTOK_ACCESS_TOKEN_2") or os.getenv("TIKTOK_ACCESS_TOKEN_ZECHENG", "")
 
     @property
     def ADVERTISER_ID(self) -> str:
@@ -57,8 +64,8 @@ class TikTokConfig:
 
     @property
     def PROXY(self) -> Optional[str]:
-        """Explicit proxy for business-api calls (e.g. library consumers like
-        lark-bot whose process must NOT set global HTTP(S)_PROXY).
+        """Explicit proxy for business-api calls (e.g. library consumers whose
+        process must NOT set global HTTP(S)_PROXY).
 
         business-api.tiktok.com is proxy-only reachable from some networks
         (launch.sh 72beccc). Unset -> None -> httpx default behavior

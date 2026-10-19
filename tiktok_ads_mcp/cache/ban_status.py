@@ -12,7 +12,7 @@ Schema:
     "detected_at": "2026-03-16",
     "last_active_date": "2026-03-16",
     "ad_type": "gmvmax",
-    "group_key": "Hiileathy-US-Shilajit",
+    "group_key": "<product group>",
     "shop_tz": "Etc/GMT+8",
     "ad_tz": "Asia/Shanghai"
   }

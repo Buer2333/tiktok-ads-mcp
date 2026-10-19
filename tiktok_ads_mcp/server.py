@@ -11,7 +11,7 @@ import functools
 from typing import Dict, List, Optional
 
 # MCP imports
-try:  # mcp>=2: FastMCP 改名 MCPServer，mcp.server.fastmcp 变成只抛错的桩
+try:  # mcp>=2 renamed FastMCP to MCPServer; mcp.server.fastmcp became a raising stub
     from mcp.server.mcpserver import MCPServer as FastMCP
 except ImportError:  # mcp<2
     from mcp.server.fastmcp import FastMCP

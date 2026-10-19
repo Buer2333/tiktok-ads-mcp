@@ -1,7 +1,6 @@
 """Timezone alignment utilities for TikTok Ads API.
 
 Pure functions for converting between shop timezone and ad-account timezone.
-Ported from lark-bot tiktok_api.py.
 """
 
 from datetime import datetime, timedelta, timezone
